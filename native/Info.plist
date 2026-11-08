@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>CFBundleDisplayName</key><string>幕台</string>
+    <key>CFBundleExecutable</key><string>LANADBManager</string>
+    <key>CFBundleIdentifier</key><string>uk.agpt.lanadbmanager</string>
+    <key>CFBundleIconFile</key><string>AppIcon.icns</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>幕台</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>4.0.0</string>
+    <key>CFBundleVersion</key><string>11</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>幕台需要发现并连接与这台 Mac 处于同一局域网的设备和模拟器。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_adb._tcp</string>
+        <string>_adb-tls-connect._tcp</string>
+        <string>_adb-tls-pairing._tcp</string>
+    </array>
+</dict>
+</plist>

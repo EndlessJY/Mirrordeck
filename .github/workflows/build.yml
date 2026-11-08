@@ -1,0 +1,64 @@
+name: 构建
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS (Apple 芯片)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install python@3.13 meson ninja pkgconf dylibbundler sdl3 ffmpeg libusb webp
+
+      - name: 单元测试
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+
+      - name: 构建应用
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build_app.sh
+
+      - name: 打包
+        run: |
+          cd build
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "幕台.app" Mirrordeck-macOS-arm64.zip
+          /usr/bin/shasum -a 256 Mirrordeck-macOS-arm64.zip | tee Mirrordeck-macOS-arm64.zip.sha256
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mirrordeck-macOS-arm64-${{ github.run_number }}
+          path: |
+            build/Mirrordeck-macOS-arm64.zip
+            build/Mirrordeck-macOS-arm64.zip.sha256
+          if-no-files-found: error
+
+      - name: 更新“最新构建”下载
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "build/幕台.app/Contents/Info.plist")
+          gh release delete latest-build --yes --cleanup-tag || true
+          gh release create latest-build \
+            build/Mirrordeck-macOS-arm64.zip build/Mirrordeck-macOS-arm64.zip.sha256 \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "最新构建 #${{ github.run_number }}" \
+            --notes "main 分支 ${GITHUB_SHA::7} 的自动构建。适用于 Apple 芯片 Mac，需要 macOS ${minimum} 或更新版本。应用未经 Apple 公证，首次打开请在“系统设置 › 隐私与安全性”中选择“仍要打开”。"

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+build/
+# Downloaded by build_app.sh (checksum-verified); not part of the source.
+vendor/downloads/
+vendor/scrcpy/
+vendor/platform-tools/
