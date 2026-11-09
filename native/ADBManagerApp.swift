@@ -357,6 +357,9 @@ final class DeviceStore: ObservableObject {
     private var pendingScan: Bool?
     private var initialSweepPending = true
     private var lastRecoverySweep = Date.distantPast
+    /// Set by the app's launch and by every ADB device change: the next scan
+    /// turns on wireless ADB for USB devices that do not have it yet.
+    private var usbCheckPending = true
 
     init() {
         // Show already-connected and Bonjour devices first, then sweep legacy
@@ -364,7 +367,10 @@ final class DeviceStore: ObservableObject {
         scan(full: false)
         pendingScan = true
         let monitor = DiscoveryMonitor()
-        monitor.onADBChange = { [weak self] in self?.requestScan(full: false) }
+        monitor.onADBChange = { [weak self] in
+            self?.usbCheckPending = true
+            self?.requestScan(full: false)
+        }
         monitor.onBonjourChange = { [weak self] in self?.requestScan(full: false) }
         monitor.onNetworkChange = { [weak self] in self?.requestScan(full: true) }
         self.monitor = monitor
@@ -418,7 +424,10 @@ final class DeviceStore: ObservableObject {
         error = nil
         phase = report == nil ? "正在发现设备…" :
                 full ? "正在发现并连接设备…" : "正在更新设备…"
-        Worker.run(full ? "scan" : "scan_fast") { [weak self] result in
+        let usbCheck = usbCheckPending
+        usbCheckPending = false
+        Worker.run(full ? "scan" : "scan_fast",
+                   payload: usbCheck ? ["usb_check": "1"] : [:]) { [weak self] result in
             guard let self else { return }
             self.scanning = false
             if full { self.initialSweepDone = true }

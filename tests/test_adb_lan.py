@@ -244,7 +244,7 @@ class TcpipTests(unittest.TestCase):
     serial = "0123abcd"
     endpoint = "10.0.0.8:5555"
 
-    def run_scan(self, attempts, mirror_serials=(), known=None):
+    def run_scan(self, attempts, mirror_serials=(), known=None, usb_check=False, opens=False):
         manager = AdbLan()
         command_calls = []
         usb = {self.serial: {"serial": self.serial, "state": "device", "model_hint": ""}}
@@ -268,7 +268,9 @@ class TcpipTests(unittest.TestCase):
                 "identity": self.serial, "manufacturer": "Xiaomi",
                 "model": "24053PY09C", "emulator": False,
             }),
-            patch.object(adb_lan, "port_open", return_value=False),
+            patch.object(adb_lan, "port_open",
+                         side_effect=lambda *_a, **_k: opens and bool(
+                             [c for c in command_calls if "tcpip" in c])),
             patch.object(adb_lan, "mirror_uses_serial",
                          side_effect=lambda serial: serial in mirror_serials),
             patch.object(adb_lan, "run_command", return_value=(
@@ -276,28 +278,58 @@ class TcpipTests(unittest.TestCase):
             )),
             patch.object(adb_lan.time, "sleep"),
         ):
-            report = manager.scan(include_subnet_scan=False)
+            report = manager.scan(include_subnet_scan=False, usb_check=usb_check)
         tcpip_calls = [call for call in command_calls if "tcpip" in call]
         return report, tcpip_calls, saved
 
-    def test_first_attempt_runs_tcpip_and_records_time(self):
-        _report, tcpip_calls, saved = self.run_scan({})
-        self.assertEqual(len(tcpip_calls), 1)
-        self.assertIn(self.serial, saved[-1])
+    def attempt(self, seconds_ago, ok=False):
+        return {self.serial: {"at": adb_lan.time.time() - seconds_ago, "ok": ok}}
 
-    def test_unreachable_port_is_not_retried_within_cooldown(self):
-        report, tcpip_calls, _saved = self.run_scan({self.serial: adb_lan.time.time()})
+    def test_first_attempt_runs_tcpip_and_records_result(self):
+        _report, tcpip_calls, saved = self.run_scan({}, opens=True)
+        self.assertEqual(len(tcpip_calls), 1)
+        self.assertTrue(saved[-1][self.serial]["ok"])
+
+    def test_failed_attempt_is_recorded_as_failed(self):
+        report, _tcpip_calls, saved = self.run_scan({})
+        self.assertFalse(saved[-1][self.serial]["ok"])
+        states = {issue["serial"]: issue["state"] for issue in report["usb_issues"]}
+        self.assertIn(self.serial, states)
+
+    def test_periodic_scan_backs_off_after_failure(self):
+        report, tcpip_calls, _saved = self.run_scan(self.attempt(10 * 60))
         self.assertEqual(tcpip_calls, [])
         states = {issue["serial"]: issue["state"] for issue in report["usb_issues"]}
         self.assertEqual(states.get(self.serial), "tcpip_unreachable")
 
-    def test_retries_after_cooldown(self):
-        old = adb_lan.time.time() - adb_lan.TCPIP_RETRY_SECONDS - 1
-        _report, tcpip_calls, _saved = self.run_scan({self.serial: old})
+    def test_periodic_scan_retries_after_backoff(self):
+        old = adb_lan.TCPIP_RETRY_SECONDS + 1
+        _report, tcpip_calls, _saved = self.run_scan(self.attempt(old))
         self.assertEqual(len(tcpip_calls), 1)
 
+    def test_device_connection_retries_despite_earlier_failure(self):
+        _report, tcpip_calls, _saved = self.run_scan(self.attempt(10 * 60), usb_check=True)
+        self.assertEqual(len(tcpip_calls), 1)
+
+    def test_periodic_scan_retries_when_wireless_was_lost_after_success(self):
+        # e.g. the phone rebooted, which turns wireless ADB off again.
+        _report, tcpip_calls, _saved = self.run_scan(self.attempt(10 * 60, ok=True))
+        self.assertEqual(len(tcpip_calls), 1)
+
+    def test_reconnect_caused_by_tcpip_does_not_loop(self):
+        _report, tcpip_calls, _saved = self.run_scan(self.attempt(20), usb_check=True)
+        self.assertEqual(tcpip_calls, [])
+
+    def test_old_attempt_file_format_is_read(self):
+        manager = AdbLan()
+        with patch.object(adb_lan.TCPIP_FILE.__class__, "read_text",
+                          return_value='{"%s": 1700000000.0}' % self.serial):
+            attempts = manager.load_tcpip_attempts()
+        self.assertEqual(attempts[self.serial], {"at": 1700000000.0, "ok": False})
+
     def test_usb_projection_blocks_tcpip(self):
-        _report, tcpip_calls, _saved = self.run_scan({}, mirror_serials={self.serial})
+        _report, tcpip_calls, _saved = self.run_scan({}, mirror_serials={self.serial},
+                                                     usb_check=True)
         self.assertEqual(tcpip_calls, [])
 
     def test_known_endpoint_with_closed_port_still_enables_tcpip(self):

@@ -19,8 +19,12 @@ from typing import Callable
 APP_DIR = Path.home() / "Library" / "Application Support" / "LAN ADB Manager"
 KNOWN_FILE = APP_DIR / "known_endpoints.json"
 TCPIP_FILE = APP_DIR / "tcpip_attempts.json"
-# `adb tcpip` restarts adbd and drops the USB link, so retry it rarely.
+# `adb tcpip` restarts adbd and drops the USB link. A device connection or an
+# app launch always checks again; periodic scans retry a failed attempt only
+# after the back-off. The guard stops the reconnect that `adb tcpip` itself
+# causes from triggering another attempt.
 TCPIP_RETRY_SECONDS = 30 * 60
+TCPIP_LOOP_GUARD_SECONDS = 2 * 60
 ADB_PORT = 5037
 SCAN_PORTS = (5555, 5557, 16416)
 IGNORED_INTERFACES = ("lo", "utun", "awdl", "llw", "bridge", "vmenet")
@@ -211,6 +215,22 @@ MARKET_NAME_PROPS = (
     "ro.config.marketing_name",
     "ro.product.system.marketname",
 )
+
+
+def tcpip_decision(last: dict | None, now: float, forced: bool) -> str:
+    """Whether to run `adb tcpip` for a USB device whose wireless port is closed.
+
+    `last` is the previous attempt ({"at": seconds, "ok": bool}) or None.
+    Returns "try", "loop_guard" (attempted moments ago) or "backoff".
+    """
+    if not last:
+        return "try"
+    elapsed = now - float(last.get("at", 0.0))
+    if elapsed < TCPIP_LOOP_GUARD_SECONDS:
+        return "loop_guard"
+    if not forced and not last.get("ok") and elapsed < TCPIP_RETRY_SECONDS:
+        return "backoff"
+    return "try"
 
 
 def market_name(props: dict[str, str]) -> str:
@@ -528,17 +548,25 @@ class AdbLan:
         temporary.write_text(json.dumps(known, ensure_ascii=False, indent=2) + "\n")
         os.replace(temporary, KNOWN_FILE)
 
-    def load_tcpip_attempts(self) -> dict[str, float]:
+    def load_tcpip_attempts(self) -> dict[str, dict]:
         try:
             data = json.loads(TCPIP_FILE.read_text())
-            return {
-                identity: float(stamp) for identity, stamp in data.items()
-                if isinstance(identity, str) and isinstance(stamp, (int, float))
-            }
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError):
             return {}
+        if not isinstance(data, dict):
+            return {}
+        attempts = {}
+        for identity, value in data.items():
+            if not isinstance(identity, str):
+                continue
+            if isinstance(value, (int, float)):
+                # Older versions stored only the time of an attempt.
+                attempts[identity] = {"at": float(value), "ok": False}
+            elif isinstance(value, dict) and isinstance(value.get("at"), (int, float)):
+                attempts[identity] = {"at": float(value["at"]), "ok": bool(value.get("ok"))}
+        return attempts
 
-    def save_tcpip_attempts(self, attempts: dict[str, float]) -> None:
+    def save_tcpip_attempts(self, attempts: dict[str, dict]) -> None:
         APP_DIR.mkdir(parents=True, exist_ok=True)
         temporary = TCPIP_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(attempts, indent=2) + "\n")
@@ -684,7 +712,20 @@ class AdbLan:
                 return
             previous = current
 
-    def scan(self, include_subnet_scan: bool = True) -> dict:
+    def _wifi_ips_settled(self, serial: str, wait: bool) -> list[str]:
+        """A device that has just connected may not report its address yet."""
+        ips = self._wifi_ips(serial)
+        for _ in range(4 if wait else 0):
+            if ips:
+                break
+            time.sleep(0.75)
+            ips = self._wifi_ips(serial)
+        return ips
+
+    def scan(self, include_subnet_scan: bool = True, usb_check: bool = False) -> dict:
+        """`usb_check` is set for scans caused by a device connection or the
+        app's launch: every USB device without wireless ADB is then set up,
+        even if an earlier attempt failed."""
         with self._operation_lock:
             started = time.monotonic()
             self.progress("检查本机 ADB 与网卡")
@@ -747,7 +788,7 @@ class AdbLan:
                 identity = self._identity(serial)
                 if identity in wireless_identities:
                     continue
-                ips = self._wifi_ips(serial)
+                ips = self._wifi_ips_settled(serial, wait=usb_check)
                 if not ips:
                     usb_issues.append({"serial": serial, "state": "no_lan_ip"})
                     continue
@@ -763,23 +804,28 @@ class AdbLan:
                     # Restarting adbd would cut an active USB projection.
                     if mirror_uses_serial(serial):
                         continue
-                    last_try = tcpip_attempts.get(identity, 0.0)
-                    if time.time() - last_try < TCPIP_RETRY_SECONDS:
-                        usb_issues.append({"serial": serial, "state": "tcpip_unreachable"})
+                    decision = tcpip_decision(tcpip_attempts.get(identity), time.time(),
+                                              forced=usb_check)
+                    if decision != "try":
+                        if not tcpip_attempts[identity]["ok"]:
+                            usb_issues.append({"serial": serial, "state": "tcpip_unreachable"})
                         continue
-                    tcpip_attempts[identity] = time.time()
-                    tcpip_changed = True
+                    self.progress("通过 USB 开启无线 ADB")
                     _code, output = self.command("-s", serial, "tcpip", "5555", timeout=7)
-                    if "restarting in TCP mode" not in output:
-                        if not port_open_stable(endpoint):
-                            usb_issues.append({"serial": serial, "state": output or "无法启用 TCP ADB"})
-                            continue
-                    for _ in range(8):
-                        if port_open_stable(endpoint, attempts=2):
-                            break
-                        time.sleep(0.3)
-                elif tcpip_attempts.pop(identity, None) is not None:
+                    opened = False
+                    if "restarting in TCP mode" in output or port_open_stable(endpoint):
+                        for _ in range(12):
+                            if port_open_stable(endpoint, attempts=2):
+                                opened = True
+                                break
+                            time.sleep(0.3)
+                    tcpip_attempts[identity] = {"at": time.time(), "ok": opened}
                     tcpip_changed = True
+                    if not opened:
+                        usb_issues.append({"serial": serial,
+                                           "state": "tcpip_unreachable" if "restarting" in output
+                                           else (output or "无法启用 TCP ADB")})
+                        continue
                 add(endpoint, "USB 自动启用")
             if tcpip_changed:
                 self.save_tcpip_attempts(tcpip_attempts)

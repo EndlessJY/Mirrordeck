@@ -25,7 +25,7 @@ macOS 原生的多设备投屏与管理应用。打开 `~/Applications/幕台.ap
 - 读取已连接的 USB、无线 ADB 和模拟器传输。
 - 读取 ADB 的 mDNS 广播，发现 Android 11+ 加密无线调试的动态端口。
 - 并行扫描本机局域网常见的 ADB 端口 `5555`、`5557`、`16416`，并检查本机模拟器监听端口。
-- 对已经通过 USB 授权、与电脑同网段但无线端口不可达的设备（包括手机重启后无线 ADB 被关闭的情况），尝试启用 `adb tcpip 5555`；同一设备 30 分钟内最多尝试一次，正在 USB 投屏或录制的设备不执行，以免中断。
+- USB 连接即自动开启无线 ADB：每次有设备连接（插入 USB、授权通过、USB 重连）以及每次启动应用，都会检查所有已授权的 USB 设备；手机与电脑在同一局域网、但无线端口没开时，自动执行 `adb tcpip 5555` 并连上无线，之后拔掉 USB 也能继续使用。刚连接的设备读不到网络信息时会稍等几秒再试。定时补扫只在上次开启失败后 30 分钟内跳过；`adb tcpip` 本身会让 USB 重连一次，所以同一设备 2 分钟内不重复执行。正在 USB 投屏或录制的设备不执行，以免中断。
 - 对端口可达而 ADB 误报 `No route to host` 的情况，重启本机 5037 ADB 服务后重试；有投屏运行时不重启。
 - 按物理设备 ID 合并 USB 和无线连接；同一模拟器进程的多个端口也合并显示。
 - 本机数据位于 `~/Library/Application Support/LAN ADB Manager/`：成功的端点与设备 ID（`known_endpoints.json`）、`tcpip` 尝试记录、设备信息缓存和各设备的投屏辅助程序；旧版本的投屏辅助程序会自动清理。
@@ -45,7 +45,7 @@ macOS 原生的多设备投屏与管理应用。打开 `~/Applications/幕台.ap
 
 自动构建流程见 `.github/workflows/build.yml`：安装 Homebrew 依赖、运行单元测试、以运行编号作为构建号执行 `build_app.sh`，然后上传 zip 安装包。
 
-构建需要 Swift 编译器、Python 3、Meson、Ninja、dylibbundler，以及 SDL3、FFmpeg、libusb 和 libwebp（Homebrew `webp`，静态链接进应用）开发库。脚本在 `build/venv` 安装固定版本的 PyInstaller，把 Python 扫描程序独立打包；它还会编译 `vendor/scrcpy-source` 中修改过的 scrcpy 客户端并打包动态库。官方 scrcpy 发行包（提供 ADB 和设备端）在缺少时自动下载到 `vendor/downloads/`，打包前校验 SHA-256。构建脚本会检查应用包内所有程序和动态库要求的系统版本，把其中最高的写入 `LSMinimumSystemVersion`，避免在不支持的系统上打开后才失败。构建结果在 `build/幕台.app`；安装后不需要这些构建工具。应用内部标识仍为 `uk.agpt.lanadbmanager`，以保留已有设置和系统授权。
+构建需要 Swift 编译器、Python 3、Meson、Ninja、dylibbundler，以及 SDL3、FFmpeg、libusb 和 libwebp（Homebrew `webp`，静态链接进应用）开发库。脚本在 `build/venv` 安装固定版本的 PyInstaller，把 Python 扫描程序独立打包；它还会编译 `vendor/scrcpy-source` 中修改过的 scrcpy 客户端并打包动态库。官方 scrcpy 发行包（提供 ADB 和设备端）在缺少时自动下载到 `vendor/downloads/`，打包前校验 SHA-256。构建脚本会检查应用包内所有程序和动态库要求的系统版本，把其中最高的主版本号写入 `LSMinimumSystemVersion`，避免在不支持的系统上打开后才失败。构建结果在 `build/幕台.app`；安装后不需要这些构建工具。应用内部标识仍为 `uk.agpt.lanadbmanager`，以保留已有设置和系统授权。
 
 对 scrcpy 源码的修改（均以 `LANADB` 注释标出）：
 

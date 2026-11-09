@@ -18,10 +18,11 @@ def main():
     if not isinstance(payload, dict):
         raise ValueError("请求格式错误")
     manager = AdbLan(progress=lambda message: emit({"progress": message}))
+    usb_check = str(payload.get("usb_check", "")) == "1"
     if action == "scan":
-        emit({"report": manager.scan()})
+        emit({"report": manager.scan(usb_check=usb_check)})
     elif action == "scan_fast":
-        emit({"report": manager.scan(include_subnet_scan=False)})
+        emit({"report": manager.scan(include_subnet_scan=False, usb_check=usb_check)})
     elif action == "connect":
         emit({"result": manager.connect_manual(str(payload.get("endpoint", "")).strip())})
     elif action == "pair":

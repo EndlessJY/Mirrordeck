@@ -84,11 +84,12 @@ done
 mkdir -p "$mirror/Contents/Resources"
 /bin/cp "$app/Contents/Resources/AppIcon.icns" "$mirror/Contents/Resources/AppIcon.icns"
 # The bundled Homebrew libraries decide the oldest macOS the app runs on
-# (they are built for the macOS of the build machine); declare exactly that.
-minimum="$(/usr/bin/find "$app" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) -print0 | \
+# (they are built for the macOS of the build machine). Libraries load on any
+# release of their major version, so declare that major version.
+major="$(/usr/bin/find "$app" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) -print0 | \
   /usr/bin/xargs -0 /usr/bin/otool -l 2>/dev/null | \
-  /usr/bin/awk '$1 == "minos" { print $2 }' | /usr/bin/sort -t. -k1,1n -k2,2n -k3,3n | /usr/bin/tail -1)"
-minimum="${minimum:-14.0}"
+  /usr/bin/awk '$1 == "minos" { split($2, v, "."); print v[1] }' | /usr/bin/sort -n | /usr/bin/tail -1)"
+minimum="${major:-14}.0"
 for plist in "$app/Contents/Info.plist" "$mirror/Contents/Info.plist"; do
   /usr/libexec/PlistBuddy -c "Delete :LSMinimumSystemVersion" "$plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string $minimum" "$plist"
