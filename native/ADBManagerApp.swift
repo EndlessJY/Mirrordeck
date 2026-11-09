@@ -1122,7 +1122,7 @@ struct MirrorSettingsView: View {
     @AppStorage("mirror.audioBitrateKbps") private var audioBitrateKbps = 128
     @AppStorage("mirror.videoCodec") private var videoCodec = "h265"
     @AppStorage(DeviceActions.directoryKey) private var saveDirectory = ""
-    @AppStorage(MirrorStore.revealInFinderKey) private var revealInFinder = true
+    @AppStorage(MirrorStore.revealInFinderKey) private var revealInFinder = false
     @AppStorage(MirrorStore.copyToClipboardKey) private var copyToClipboard = true
     @AppStorage(RecordingSettings.qualityKey) private var recordQuality = "standard"
     @AppStorage(RecordingSettings.formatKey) private var recordFormat = "mp4"

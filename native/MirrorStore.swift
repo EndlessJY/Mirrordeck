@@ -31,7 +31,7 @@ final class MirrorStore: ObservableObject {
         UserDefaults.standard.object(forKey: Self.copyToClipboardKey) as? Bool ?? true
     }
     private var revealAutomatically: Bool {
-        UserDefaults.standard.object(forKey: Self.revealInFinderKey) as? Bool ?? true
+        UserDefaults.standard.object(forKey: Self.revealInFinderKey) as? Bool ?? false
     }
     private static let actionName = Notification.Name("uk.agpt.lanadbmanager.mirror.action")
     private static let stateName = Notification.Name("uk.agpt.lanadbmanager.mirror.state")
@@ -187,9 +187,9 @@ final class MirrorStore: ObservableObject {
                     self?.errors[id] = nil
                     // The mirror shows a thumbnail (click reveals the file); Finder
                     // opens by itself only when the user turned that on.
-                    self?.notifyMirror(id: id, kind: "screenshot",
-                                       success: true, message: "", path: url.path)
-                    if self?.copyAutomatically == true { Self.copyToClipboard(url) }
+                    let copied = self?.copyAutomatically == true && Self.copyToClipboard(url)
+                    self?.notifyMirror(id: id, kind: "screenshot", success: true, message: "",
+                                       path: url.path, copied: copied)
                     if self?.revealAutomatically == true {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                             self?.revealCapture(url, deviceID: id)
@@ -220,10 +220,13 @@ final class MirrorStore: ObservableObject {
             guard folders.contains(file.deletingLastPathComponent().path),
                   FileManager.default.fileExists(atPath: file.path) else { return }
             revealCapture(file, deviceID: id)
-        case "record", "gif" where appWindowTitles[id] != nil:
-            handleAppRecording(id: id, device: device, kind: action,
-                               info: notification.userInfo ?? [:])
         case "record", "gif":
+            // (A `where` clause would only guard the last pattern of the case.)
+            if appWindowTitles[id] != nil {
+                handleAppRecording(id: id, device: device, kind: action,
+                                   info: notification.userInfo ?? [:])
+                return
+            }
             if let recorder = recordingProcesses[id] {
                 guard recordingKinds[id] == action else { return }
                 recordingStops.insert(id)
@@ -240,11 +243,13 @@ final class MirrorStore: ObservableObject {
 
     private func notifyMirror(id: String, kind: String, success: Bool, message: String,
                               recording: Bool? = nil, path: String? = nil,
-                              thumb: String? = nil, recordTo: String? = nil) {
+                              thumb: String? = nil, recordTo: String? = nil,
+                              copied: Bool = false) {
         guard let token = sessionTokens[id] else { return }
         var info: [String: Any] = ["token": token, "kind": kind,
                                    "success": success, "message": message]
         if let recordTo { info["recordTo"] = recordTo }
+        if copied { info["copied"] = true }
         if let recording { info["recording"] = recording }
         if let path { info["path"] = path }
         if let thumb { info["thumb"] = thumb }
@@ -514,14 +519,15 @@ final class MirrorStore: ObservableObject {
         messages[id] = nil
         errors[id] = nil
         let reveal = revealAutomatically
-        if copyAutomatically { Self.copyToClipboard(destination) }
+        let copied = copyAutomatically && Self.copyToClipboard(destination)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // A still of the recording for the thumbnail in the mirror window.
             let thumb = kind == "gif" ? destination : Self.posterFrame(for: destination)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.notifyMirror(id: id, kind: kind, success: true, message: "",
-                                  recording: false, path: destination.path, thumb: thumb?.path)
+                                  recording: false, path: destination.path, thumb: thumb?.path,
+                                  copied: copied)
                 if reveal { self.revealCapture(destination, deviceID: id) }
             }
         }
@@ -532,7 +538,8 @@ final class MirrorStore: ObservableObject {
     /// a GIF or WebP as an animation). A screenshot also carries its PNG data,
     /// for apps that paste images but not files (Notes, Preview, documents);
     /// both live in one pasteboard item, so it pastes once.
-    private static func copyToClipboard(_ url: URL) {
+    @discardableResult
+    private static func copyToClipboard(_ url: URL) -> Bool {
         let item = NSPasteboardItem()
         item.setString(url.absoluteString, forType: .fileURL)
         if url.pathExtension.lowercased() == "png", let data = try? Data(contentsOf: url) {
@@ -540,7 +547,7 @@ final class MirrorStore: ObservableObject {
         }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.writeObjects([item])
+        return pasteboard.writeObjects([item])
     }
 
     private static func posterFrame(for video: URL) -> URL? {

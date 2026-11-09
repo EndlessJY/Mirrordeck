@@ -48,6 +48,9 @@ enum {
 @property(nonatomic, strong) NSView *dot;
 @property(nonatomic, strong) NSProgressIndicator *spinner;
 @property(nonatomic) BOOL busy;
+// A short confirmation ("已复制到剪贴板") instead of the recording clock.
+@property(nonatomic) BOOL notice;
+- (void)showNotice:(NSString *)text;
 @property(nonatomic, copy) void (^onClick)(void);
 - (void)showText:(NSString *)text busy:(BOOL)busy;
 - (CGFloat)preferredWidth;
@@ -92,18 +95,51 @@ enum {
 }
 - (CGFloat)preferredWidth {
     [self.label sizeToFit];
-    return ceil(28 + self.label.frame.size.width + 14);
+    return ceil((self.notice ? 13 : 28) + self.label.frame.size.width + 14);
 }
 - (void)layout {
     [super layout];
     [self.label sizeToFit];
     NSRect frame = self.label.frame;
-    frame.origin = NSMakePoint(28, round((self.bounds.size.height - frame.size.height) / 2));
+    frame.origin = NSMakePoint(self.notice ? 13 : 28,
+                               round((self.bounds.size.height - frame.size.height) / 2));
     self.label.frame = frame;
 }
+- (void)showNotice:(NSString *)text {
+    self.notice = YES;
+    self.busy = YES;
+    [self.spinner stopAnimation:nil];
+    [self.dot.layer removeAllAnimations];
+    self.dot.hidden = YES;
+    self.toolTip = nil;
+    NSImage *symbol = [NSImage imageWithSystemSymbolName:@"checkmark.circle.fill"
+                                accessibilityDescription:nil];
+    symbol = [symbol imageWithSymbolConfiguration:[[NSImageSymbolConfiguration
+        configurationWithPointSize:12.5 weight:NSFontWeightSemibold]
+        configurationByApplyingConfiguration:[NSImageSymbolConfiguration
+            configurationWithHierarchicalColor:NSColor.systemGreenColor]]];
+    NSTextAttachment *mark = [[NSTextAttachment alloc] init];
+    mark.image = symbol;
+    mark.bounds = NSMakeRect(0, -2.5, symbol.size.width, symbol.size.height);
+    NSMutableAttributedString *value = [[NSMutableAttributedString alloc] init];
+    [value appendAttributedString:[NSAttributedString attributedStringWithAttachment:mark]];
+    [value appendAttributedString:[[NSAttributedString alloc]
+        initWithString:[@" " stringByAppendingString:text] attributes:@{
+            NSFontAttributeName: [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName: NSColor.whiteColor,
+        }]];
+    self.label.attributedStringValue = value;
+    self.alphaValue = 1;
+    self.hidden = NO;
+    [self.window invalidateCursorRectsForView:self];
+    self.needsLayout = YES;
+}
 - (void)showText:(NSString *)text busy:(BOOL)busy {
-    BOOL changedState = busy != self.busy || self.hidden;
+    BOOL changedState = busy != self.busy || self.hidden || self.notice;
+    self.notice = NO;
+    self.alphaValue = 1;
     self.busy = busy;
+    self.label.font = [NSFont monospacedDigitSystemFontOfSize:12.5 weight:NSFontWeightSemibold];
     self.label.stringValue = text;
     self.label.textColor = busy ? [NSColor colorWithWhite:1 alpha:0.8] : NSColor.whiteColor;
     self.dot.hidden = busy;
@@ -768,6 +804,28 @@ enum {
                                        NSMaxY(content.bounds) - 28 - 12, pillWidth, 28);
 }
 
+/// "已复制到剪贴板" where the recording clock was, then fades away.
+- (void)showCopiedNotice {
+    if (self.recording || self.countdown > 0) { return; }
+    [self.statusPill showNotice:@"已复制到剪贴板"];
+    [self placeStatusPill];
+    LANADBStatusPill *pill = self.statusPill;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!pill.notice) { return; }
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.3;
+            pill.animator.alphaValue = 0;
+        } completionHandler:^{
+            if (pill.notice) {
+                pill.hidden = YES;
+                pill.notice = NO;
+                pill.alphaValue = 1;
+            }
+        }];
+    });
+}
+
 - (void)showPillBusy:(NSString *)text compact:(NSString *)compact {
     self.pillText = text;
     self.pillCompactText = compact;
@@ -891,6 +949,7 @@ enum {
             [self updateButtons];
             if (success) {
                 [self showScreenshotThumbnail:info[@"path"]];
+                if ([info[@"copied"] boolValue]) { [self showCopiedNotice]; }
             } else {
                 [self showFeedback:message nearButton:SC_BUTTON_SCREENSHOT];
             }
@@ -927,6 +986,10 @@ enum {
                 self.captureKind = nil;
                 if (success && [info[@"path"] length]) {
                     [self showCaptureThumbnail:info[@"thumb"] ?: info[@"path"] file:info[@"path"]];
+                }
+                if (success && [info[@"copied"] boolValue]) {
+                    // After `recording` is cleared below.
+                    dispatch_async(dispatch_get_main_queue(), ^{ [self showCopiedNotice]; });
                 }
             }
             self.recording = active;
