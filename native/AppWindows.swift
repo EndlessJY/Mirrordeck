@@ -6,7 +6,55 @@ struct DeviceApp: Identifiable, Hashable {
     let label: String
     let package: String
     let system: Bool
+    /// Lowercased forms a search may match: name, package, full pinyin
+    /// ("jisuanqi"), initials ("jsq"), and initials keeping Latin words
+    /// whole ("qqyl" for QQ音乐).
+    let searchKeys: [String]
     var id: String { package }
+
+    init(label: String, package: String, system: Bool) {
+        self.label = label
+        self.package = package
+        self.system = system
+        searchKeys = Self.keys(for: label) + [package.lowercased()]
+    }
+
+    private static func latin(_ text: String) -> [String] {
+        let string = NSMutableString(string: text)
+        CFStringTransform(string, nil, kCFStringTransformToLatin, false)
+        CFStringTransform(string, nil, kCFStringTransformStripDiacritics, false)
+        return (string as String).lowercased()
+            .split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    }
+
+    static func keys(for label: String) -> [String] {
+        let tokens = latin(label)
+        var wordInitials = ""
+        var run = ""
+        for character in label {
+            if character.isASCII && (character.isLetter || character.isNumber) {
+                run.append(character)
+                continue
+            }
+            wordInitials += run.lowercased()
+            run = ""
+            if let first = latin(String(character)).first?.first { wordInitials.append(first) }
+        }
+        wordInitials += run.lowercased()
+        let keys = [label.lowercased(), tokens.joined(),
+                    String(tokens.compactMap(\.first)), wordInitials]
+        var seen = Set<String>()
+        return keys.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// 0: name, pinyin or initials start with the query; 1: contained; nil: no match.
+    func rank(for query: String) -> Int? {
+        let text = query.lowercased().filter { !$0.isWhitespace }
+        guard !text.isEmpty else { return 0 }
+        if searchKeys.contains(where: { $0.hasPrefix(text) }) { return 0 }
+        if searchKeys.contains(where: { $0.contains(text) }) { return 1 }
+        return nil
+    }
 }
 
 /// Opens single apps of a device in their own Mac windows. Each window runs
@@ -22,6 +70,25 @@ final class AppWindowStore: ObservableObject {
     @Published var errors: [String: String] = [:]
     /// Packages whose window is starting or open, per device.
     @Published private(set) var open: [String: Set<String>] = [:]
+    /// Packages opened most recently, per device (newest first).
+    @Published private(set) var recent: [String: [String]] = [:]
+    private static let recentLimit = 8
+    private static func recentKey(_ id: String) -> String { "apps.recent." + id }
+
+    func recentPackages(for device: ADBDevice) -> [String] {
+        if let list = recent[device.identity] { return list }
+        let stored = UserDefaults.standard.stringArray(forKey: Self.recentKey(device.identity)) ?? []
+        DispatchQueue.main.async { self.recent[device.identity] = stored }
+        return stored
+    }
+
+    private func remember(_ package: String, on device: ADBDevice) {
+        var list = recentPackages(for: device).filter { $0 != package }
+        list.insert(package, at: 0)
+        list = Array(list.prefix(Self.recentLimit))
+        recent[device.identity] = list
+        UserDefaults.standard.set(list, forKey: Self.recentKey(device.identity))
+    }
     private var processes: [String: Process] = [:]
     private var iconData: [String: [String: Data]] = [:]
     private var watchers: [String: DispatchSourceTimer] = [:]
@@ -177,6 +244,7 @@ final class AppWindowStore: ObservableObject {
             errors[id] = "无法准备投屏程序：\(error.localizedDescription)"
             return
         }
+        remember(app.package, on: device)
         let title = "\(app.label) · \(device.title)"
         let process = Process()
         process.executableURL = executable

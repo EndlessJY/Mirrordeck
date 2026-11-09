@@ -11,13 +11,21 @@ struct AppPickerView: View {
 
     private var apps: [DeviceApp] { store.apps[device.id] ?? [] }
 
+    private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Matches by name, package, pinyin or initials; the best matches first.
     private var filtered: [DeviceApp] {
-        let text = query.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return apps }
-        return apps.filter {
-            $0.label.localizedCaseInsensitiveContains(text) ||
-                $0.package.localizedCaseInsensitiveContains(text)
-        }
+        guard searching else { return apps }
+        return apps.enumerated()
+            .compactMap { index, app in app.rank(for: query).map { (app, $0, index) } }
+            .sorted { ($0.1, $0.2) < ($1.1, $1.2) }
+            .map(\.0)
+    }
+
+    /// Recently opened apps that are still installed, newest first.
+    private var recentApps: [DeviceApp] {
+        let byPackage = Dictionary(apps.map { ($0.package, $0) }, uniquingKeysWith: { a, _ in a })
+        return store.recentPackages(for: device).compactMap { byPackage[$0] }
     }
 
     var body: some View {
@@ -40,7 +48,7 @@ struct AppPickerView: View {
             }
             .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
 
-            TextField("搜索应用名称或包名", text: $query)
+            TextField("搜索名称、拼音首字母或包名", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 16).padding(.bottom, 10)
 
@@ -82,8 +90,18 @@ struct AppPickerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             List(selection: $selection) {
-                let installed = filtered.filter { !$0.system }
-                let system = filtered.filter(\.system)
+                let recents = searching ? [] : recentApps
+                let shown = Set(recents.map(\.package))
+                let rest = filtered.filter { !shown.contains($0.package) }
+                if searching {
+                    // One list in match order: best matches on top.
+                    Section("搜索结果") { ForEach(rest) { row($0) } }
+                }
+                let installed = searching ? [] : rest.filter { !$0.system }
+                let system = searching ? [] : rest.filter(\.system)
+                if !recents.isEmpty {
+                    Section("最近投屏") { ForEach(recents) { row($0) } }
+                }
                 if !installed.isEmpty {
                     Section("已安装") { ForEach(installed) { row($0) } }
                 }
