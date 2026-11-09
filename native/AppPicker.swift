@@ -100,7 +100,7 @@ struct AppPickerView: View {
                 let installed = searching ? [] : rest.filter { !$0.system }
                 let system = searching ? [] : rest.filter(\.system)
                 if !recents.isEmpty {
-                    Section("最近投屏") { ForEach(recents) { row($0) } }
+                    Section("最近") { ForEach(recents) { row($0) } }
                 }
                 if !installed.isEmpty {
                     Section("已安装") { ForEach(installed) { row($0) } }
