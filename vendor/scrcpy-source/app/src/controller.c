@@ -31,6 +31,38 @@ sc_lanadb_set_display_power(bool on) {
     return sc_controller_push_msg(lanadb_controller, &msg);
 }
 
+// LANADB: a key through scrcpy's own channel reaches the display this client
+// shows (a virtual display included); `adb shell input` only the main one.
+bool
+sc_lanadb_press_key(int keycode) {
+    if (!lanadb_controller) {
+        return false;
+    }
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_INJECT_KEYCODE;
+    msg.inject_keycode.keycode = keycode;
+    msg.inject_keycode.metastate = 0;
+    msg.inject_keycode.repeat = 0;
+    msg.inject_keycode.action = AKEY_EVENT_ACTION_DOWN;
+    if (!sc_controller_push_msg(lanadb_controller, &msg)) {
+        return false;
+    }
+    msg.inject_keycode.action = AKEY_EVENT_ACTION_UP;
+    return sc_controller_push_msg(lanadb_controller, &msg);
+}
+
+// LANADB: a fresh encoder session (config packet plus key frame), so a
+// recording started mid-stream begins with a complete picture.
+bool
+sc_lanadb_reset_video(void) {
+    if (!lanadb_controller) {
+        return false;
+    }
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_RESET_VIDEO;
+    return sc_controller_push_msg(lanadb_controller, &msg);
+}
+
 bool
 sc_controller_init(struct sc_controller *controller, sc_socket control_socket,
                    const struct sc_controller_callbacks *cbs,

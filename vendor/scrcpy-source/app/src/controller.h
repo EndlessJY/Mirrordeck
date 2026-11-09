@@ -72,4 +72,14 @@ void
 sc_controller_resize_display(struct sc_controller *controller,
                              uint16_t width, uint16_t height);
 
+// LANADB: reach the device from the native title bar.
+bool
+sc_lanadb_set_display_power(bool on);
+
+bool
+sc_lanadb_press_key(int keycode);
+
+bool
+sc_lanadb_reset_video(void);
+
 #endif

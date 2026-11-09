@@ -8,6 +8,11 @@
 #include <stdbool.h>
 void sc_audio_player_set_muted(bool muted);
 bool sc_lanadb_set_display_power(bool on);
+bool sc_lanadb_press_key(int keycode);
+// LANADB: on-demand recording of single-app windows.
+bool lanadb_record_start(const char *filename, int format);
+bool lanadb_record_stop(void);
+enum { LANADB_FORMAT_MP4 = 1, LANADB_FORMAT_MKV = 2 };
 bool sc_lanadb_snapshot(uint8_t **rgba, int *width, int *height);
 void *sc_lanadb_snapshot_buffer(void);
 bool sc_audio_player_is_muted(void);
@@ -182,6 +187,56 @@ enum {
 @end
 
 // Dims the device picture and shows the countdown digit in its centre.
+// LANADB: shown over a single-app window until the app has drawn, instead of
+// the empty (black) virtual display it starts with.
+@interface LANADBLaunchView : NSView
+- (instancetype)initWithFrame:(NSRect)frame label:(NSString *)label icon:(NSImage *)icon;
+@end
+
+@implementation LANADBLaunchView
+- (instancetype)initWithFrame:(NSRect)frame label:(NSString *)label icon:(NSImage *)icon {
+    self = [super initWithFrame:frame];
+    if (!self) { return nil; }
+    self.wantsLayer = YES;
+    self.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeCenterX;
+    stack.spacing = 14;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    if (icon) {
+        NSImageView *image = [NSImageView imageViewWithImage:icon];
+        image.wantsLayer = YES;
+        image.layer.cornerRadius = 18;
+        image.layer.masksToBounds = YES;
+        [image.widthAnchor constraintEqualToConstant:76].active = YES;
+        [image.heightAnchor constraintEqualToConstant:76].active = YES;
+        [stack addArrangedSubview:image];
+    }
+    NSTextField *title = [NSTextField labelWithString:label.length ? label : @"正在打开"];
+    title.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
+    title.textColor = NSColor.labelColor;
+    [stack addArrangedSubview:title];
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] init];
+    spinner.style = NSProgressIndicatorStyleSpinning;
+    spinner.controlSize = NSControlSizeSmall;
+    [spinner startAnimation:nil];
+    [stack addArrangedSubview:spinner];
+    [self addSubview:stack];
+    [stack.centerXAnchor constraintEqualToAnchor:self.centerXAnchor].active = YES;
+    [stack.centerYAnchor constraintEqualToAnchor:self.centerYAnchor constant:-20].active = YES;
+    return self;
+}
+- (void)updateLayer {
+    self.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
+}
+// Clicks and keys go to the app underneath while it is still loading.
+- (NSView *)hitTest:(NSPoint)point {
+    (void) point;
+    return nil;
+}
+@end
+
 @interface LANADBCountdownView : LANADBFlashView
 @property(nonatomic, strong) NSTextField *digit;
 - (void)showNumber:(NSInteger)number;
@@ -319,6 +374,12 @@ enum {
 @property(nonatomic) BOOL screenKnown;
 @property(nonatomic) BOOL displayOff;
 @property(nonatomic) NSInteger sdkLevel;
+// LANADB: a single app on its own virtual display. Device-wide controls
+// (capture, volume, power) stay in the device's main mirror window.
+@property(nonatomic) BOOL appWindow;
+@property(nonatomic, strong) LANADBLaunchView *launchView;
+@property(nonatomic, strong) NSTimer *launchTimer;
+@property(nonatomic) NSInteger launchChecks;
 @property(nonatomic, strong) id keyMonitor;
 @property(nonatomic) NSUInteger stateRevision;
 @property(nonatomic) BOOL temporarilyLoweredForFinder;
@@ -352,6 +413,7 @@ enum {
     _audioAvailable = !getenv("LANADB_AUDIO_ENABLED") ||
         strcmp(getenv("LANADB_AUDIO_ENABLED"), "0") != 0;
     _musicMuted = sc_audio_player_is_muted();
+    _appWindow = getenv("LANADB_APP_WINDOW") && !strcmp(getenv("LANADB_APP_WINDOW"), "1");
     _actionQueue = dispatch_queue_create("lanadb.scrcpy.titlebar.actions", DISPATCH_QUEUE_SERIAL);
     _statusQueue = dispatch_queue_create("lanadb.scrcpy.titlebar.status", DISPATCH_QUEUE_SERIAL);
     self.layoutAttribute = NSLayoutAttributeBottom;
@@ -374,6 +436,9 @@ enum {
     }
     NSView *navigation = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 87, 26)];
     for (NSInteger index = SC_BUTTON_BACK; index <= SC_BUTTON_RECENTS; ++index) {
+        if (_appWindow && index == SC_BUTTON_BACK) {
+            continue;
+        }
         [_buttons[index] removeFromSuperview];
         _buttons[index].frame = NSMakeRect((index - SC_BUTTON_BACK) * 29, 0, 27, 26);
         [navigation addSubview:_buttons[index]];
@@ -393,6 +458,19 @@ enum {
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(mirrorStateChanged:)
         name:@"uk.agpt.lanadbmanager.mirror.state" object:nil];
+    if (_appWindow) {
+        // Home and Recents would open the launcher on the virtual display, so
+        // they are left out; Back moves to the front of the button row. The
+        // editing shortcuts use `adb shell input`, which only reaches the main
+        // display, so scrcpy's own input path handles those keys here.
+        _buttons[SC_BUTTON_HOME].hidden = YES;
+        _buttons[SC_BUTTON_RECENTS].hidden = YES;
+        [self updateLayout];
+        [self updateButtons];
+        [self refreshDeviceState];
+        [self showLaunchOverlay];
+        return self;
+    }
     [self updateLayout];
     [self updateButtons];
     [self refreshDeviceState];
@@ -553,6 +631,78 @@ enum {
             } completionHandler:^{ [card removeFromSuperview]; }];
         });
     }];
+}
+
+- (void)showLaunchOverlay {
+    NSView *content = self.targetWindow.contentView;
+    if (!content || self.launchView) { return; }
+    const char *label = getenv("LANADB_APP_LABEL");
+    const char *iconPath = getenv("LANADB_APP_ICON");
+    NSImage *icon = iconPath && iconPath[0] ?
+        [[NSImage alloc] initWithContentsOfFile:[NSString stringWithUTF8String:iconPath]] : nil;
+    LANADBLaunchView *view = [[LANADBLaunchView alloc]
+        initWithFrame:content.bounds
+                label:label ? [NSString stringWithUTF8String:label] : @""
+                 icon:icon];
+    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:view positioned:NSWindowAbove relativeTo:nil];
+    self.launchView = view;
+    self.launchChecks = 0;
+    __weak LANADBTitlebarController *weakSelf = self;
+    self.launchTimer = [NSTimer scheduledTimerWithTimeInterval:0.15 repeats:YES
+                                                          block:^(NSTimer *timer) {
+        LANADBTitlebarController *strongSelf = weakSelf;
+        if (!strongSelf) { [timer invalidate]; return; }
+        strongSelf.launchChecks += 1;
+        // Give up after 12 s so a dark app is never hidden for good.
+        if ([strongSelf frameHasContent] || strongSelf.launchChecks > 80) {
+            [timer invalidate];
+            [strongSelf hideLaunchOverlay];
+        }
+    }];
+}
+
+- (void)hideLaunchOverlay {
+    LANADBLaunchView *view = self.launchView;
+    self.launchView = nil;
+    [self.launchTimer invalidate];
+    self.launchTimer = nil;
+    if (!view) { return; }
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.25;
+        view.animator.alphaValue = 0;
+    } completionHandler:^{ [view removeFromSuperview]; }];
+}
+
+// True once the shown frame is not an empty (all black) display.
+- (BOOL)frameHasContent {
+    CVPixelBufferRef hardware = (CVPixelBufferRef) sc_lanadb_snapshot_buffer();
+    if (hardware) {
+        CIImage *image = [CIImage imageWithCVPixelBuffer:hardware];
+        CIFilter *average = [CIFilter filterWithName:@"CIAreaMaximum"];
+        [average setValue:image forKey:kCIInputImageKey];
+        [average setValue:[CIVector vectorWithCGRect:image.extent] forKey:kCIInputExtentKey];
+        uint8_t pixel[4] = {0};
+        static CIContext *context;
+        if (!context) { context = [CIContext contextWithOptions:@{kCIContextWorkingColorSpace: [NSNull null]}]; }
+        [context render:average.outputImage toBitmap:pixel rowBytes:4
+                 bounds:CGRectMake(0, 0, 1, 1) format:kCIFormatRGBA8 colorSpace:nil];
+        CVPixelBufferRelease(hardware);
+        return MAX(pixel[0], MAX(pixel[1], pixel[2])) > 24;
+    }
+    uint8_t *rgba = NULL;
+    int width = 0, height = 0;
+    if (!sc_lanadb_snapshot(&rgba, &width, &height)) {
+        return NO;
+    }
+    BOOL found = NO;
+    size_t total = (size_t) width * height;
+    for (size_t index = 0; index < total && !found; index += 97) {
+        uint8_t *p = rgba + index * 4;
+        found = MAX(p[0], MAX(p[1], p[2])) > 24;
+    }
+    free(rgba);
+    return found;
 }
 
 - (void)showCountdownOverlay {
@@ -748,6 +898,22 @@ enum {
             BOOL converting = [message hasPrefix:@"正在生成"];
             self.recordPending = converting;
             BOOL active = [info[@"recording"] boolValue];
+            if (active && !converting && self.appWindow && [info[@"recordTo"] length]) {
+                NSString *target = info[@"recordTo"];
+                int format = [target.pathExtension.lowercaseString
+                    isEqualToString:@"mkv"] ? LANADB_FORMAT_MKV : LANADB_FORMAT_MP4;
+                if (!lanadb_record_start(target.fileSystemRepresentation, format)) {
+                    [self postAction:kind path:nil extra:@{@"finished": @"0", @"failed": @"1"}];
+                    self.recordPending = NO;
+                    [self endCaptureClock];
+                    self.captureKind = nil;
+                    self.recording = NO;
+                    [self updateButtons];
+                    [self showFeedback:@"无法开始录制" nearButton:
+                        [kind isEqualToString:@"gif"] ? SC_BUTTON_GIF : SC_BUTTON_RECORD];
+                    return;
+                }
+            }
             if (active && !converting) {
                 self.captureKind = kind;
                 [self startCaptureClock];
@@ -801,12 +967,19 @@ enum {
             NSMakePoint(NSMidX(closeButton.bounds), NSMidY(closeButton.bounds)) toView:nil];
         start = [self.view convertPoint:closeCenter fromView:nil].x - 13.5;
     }
-    static const NSInteger order[] = {
+    static const NSInteger mirrorOrder[] = {
         SC_BUTTON_PIN, SC_BUTTON_SHADE, SC_BUTTON_VOLUME_DOWN,
         SC_BUTTON_VOLUME_UP, SC_BUTTON_MUTE, SC_BUTTON_POWER, SC_BUTTON_SCREEN_OFF,
         SC_BUTTON_SCREENSHOT, SC_BUTTON_RECORD, SC_BUTTON_GIF,
     };
-    static const NSInteger count = sizeof(order) / sizeof(order[0]);
+    static const NSInteger appOrder[] = {
+        SC_BUTTON_BACK, SC_BUTTON_PIN, SC_BUTTON_SHADE, SC_BUTTON_VOLUME_DOWN,
+        SC_BUTTON_VOLUME_UP, SC_BUTTON_MUTE, SC_BUTTON_POWER, SC_BUTTON_SCREEN_OFF,
+        SC_BUTTON_SCREENSHOT, SC_BUTTON_RECORD, SC_BUTTON_GIF,
+    };
+    const NSInteger *order = self.appWindow ? appOrder : mirrorOrder;
+    const NSInteger count = self.appWindow ? (NSInteger) (sizeof(appOrder) / sizeof(appOrder[0]))
+                                           : (NSInteger) (sizeof(mirrorOrder) / sizeof(mirrorOrder[0]));
     // A 27-point button with a 4–5-point gap halves the previous 8–9-point gap.
     CGFloat step = MIN(31.5, floor((width - start - 10 - 27) / (count - 1)));
     step = MAX(27, step);
@@ -927,11 +1100,16 @@ enum {
 }
 
 - (void)postAction:(NSString *)action path:(NSString *)path {
+    [self postAction:action path:path extra:nil];
+}
+
+- (void)postAction:(NSString *)action path:(NSString *)path extra:(NSDictionary *)extra {
     if (!self.sessionToken.length) {
         return;
     }
     NSMutableDictionary *info = [@{@"token": self.sessionToken, @"action": action} mutableCopy];
     if (path.length) { info[@"path"] = path; }
+    if (extra) { [info addEntriesFromDictionary:extra]; }
     [[NSDistributedNotificationCenter defaultCenter]
         postNotificationName:@"uk.agpt.lanadbmanager.mirror.action"
                     object:nil
@@ -1092,8 +1270,23 @@ enum {
             self.captureTimer = nil;
             [self showPillBusy:@"正在保存…" compact:@"保存中"];
             [self updateButtons];
-            [self postAction:kind];
+            if (self.appWindow) {
+                // This window recorded its own stream; finish the file, then
+                // let the app save (or convert) it.
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    bool ok = lanadb_record_stop();
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self postAction:kind path:nil extra:@{@"finished": ok ? @"1" : @"0"}];
+                    });
+                });
+            } else {
+                [self postAction:kind];
+            }
         }
+        return;
+    }
+    if (self.appWindow && index == SC_BUTTON_BACK) {
+        sc_lanadb_press_key(4); // AKEYCODE_BACK, on this window's display
         return;
     }
     NSArray<NSString *> *command;
@@ -1186,7 +1379,9 @@ sc_macos_titlebar_install(SDL_Window *window) {
               serial:[NSString stringWithUTF8String:serial]
              adbPath:[NSString stringWithUTF8String:adb]];
     [nativeWindow addTitlebarAccessoryViewController:controller];
-    [nativeWindow addTitlebarAccessoryViewController:controller.navigationAccessory];
+    if (!controller.appWindow) {
+        [nativeWindow addTitlebarAccessoryViewController:controller.navigationAccessory];
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         [controller updateLayout];
         // The mirror comes to the front the moment it is ready.

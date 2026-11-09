@@ -3,18 +3,23 @@ import Foundation
 enum DeviceActions {
     /// Saves a full-size screenshot taken by the device. When the device blocks
     /// `screencap` (some TVs), the frame the mirror showed is used instead.
+    /// `frameOnly` (single-app windows on a virtual display, which the
+    /// device's own screencap cannot reach) saves the mirror's frame directly.
     static func saveScreenshot(of device: ADBDevice, serial: String? = nil, fallback: URL? = nil,
+                               title: String? = nil, frameOnly: Bool = false,
                                completion: @escaping (URL?, String?) -> Void) {
         guard let endpoint = serial ?? MirrorStore.preferredTransports(for: device).first?.endpoint else {
             completion(nil, "设备未连接，无法截图。")
             return
         }
-        guard let destination = destination(for: device, kind: "截图", extension: "png") else {
+        guard let destination = destination(for: device, kind: "截图", extension: "png",
+                                            title: title) else {
             completion(nil, "保存位置无法写入，请在设置中更换。")
             return
         }
         DispatchQueue.global(qos: .userInitiated).async {
-            var outcome = capture(serial: endpoint, destination: destination)
+            var outcome = frameOnly ? (fallback == nil ? "无法读取窗口画面。" : "无法保存截图。") :
+                capture(serial: endpoint, destination: destination)
             if let fallback {
                 if outcome != nil, (try? FileManager.default.moveItem(at: fallback, to: destination)) != nil {
                     outcome = nil
@@ -52,7 +57,7 @@ enum DeviceActions {
         let folder = FileManager.default.temporaryDirectory
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
         for name in names where name.hasPrefix("lanadb-snapshot-") || name.hasPrefix("lanadb-poster-")
-            || name.hasPrefix("lanadb-gif-") || name.hasPrefix("lan-adb-scrcpy-")
+            || name.hasPrefix("lanadb-gif-") || name.hasPrefix("lanadb-icon-") || name.hasPrefix("lan-adb-scrcpy-")
             || name.hasPrefix("lan-adb-recording-") {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
         }
@@ -72,22 +77,25 @@ enum DeviceActions {
     static func screenshotDirectory() -> URL? { captureDirectory() }
     static func recordingDirectory() -> URL? { captureDirectory() }
 
-    static func recordingDestination(for device: ADBDevice) -> URL? {
+    static func recordingDestination(for device: ADBDevice, title: String? = nil) -> URL? {
         let format = UserDefaults.standard.string(forKey: RecordingSettings.formatKey) ?? "mp4"
-        return destination(for: device, kind: "录屏", extension: format == "mkv" ? "mkv" : "mp4")
+        return destination(for: device, kind: "录屏", extension: format == "mkv" ? "mkv" : "mp4",
+                           title: title)
     }
 
     /// The animated capture: GIF, or animated WebP when chosen in Settings.
-    static func gifDestination(for device: ADBDevice) -> URL? {
+    static func gifDestination(for device: ADBDevice, title: String? = nil) -> URL? {
         RecordingSettings.animatedIsWebP ?
-            destination(for: device, kind: "WebP", extension: "webp") :
-            destination(for: device, kind: "GIF", extension: "gif")
+            destination(for: device, kind: "WebP", extension: "webp", title: title) :
+            destination(for: device, kind: "GIF", extension: "gif", title: title)
     }
 
     /// "Xiaomi Civi 4 Pro 截图 2026-11-07 21.53.11.png", like macOS screenshots.
-    static func destination(for device: ADBDevice, kind: String, extension ext: String) -> URL? {
+    /// `title` replaces the device name (a single-app window: "计算器 · 设备名").
+    static func destination(for device: ADBDevice, kind: String, extension ext: String,
+                            title: String? = nil) -> URL? {
         guard let directory = captureDirectory() else { return nil }
-        let base = "\(safeName(device.title)) \(kind) \(fileTimestamp())"
+        let base = "\(safeName(title ?? device.title)) \(kind) \(fileTimestamp())"
         var url = directory.appendingPathComponent(base).appendingPathExtension(ext)
         var counter = 2
         while FileManager.default.fileExists(atPath: url.path) {

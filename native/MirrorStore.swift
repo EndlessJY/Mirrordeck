@@ -26,6 +26,10 @@ struct MirrorSession {
 final class MirrorStore: ObservableObject {
     static let shared = MirrorStore()
     static let revealInFinderKey = "capture.revealInFinder"
+    static let copyToClipboardKey = "capture.copyToClipboard"
+    private var copyAutomatically: Bool {
+        UserDefaults.standard.object(forKey: Self.copyToClipboardKey) as? Bool ?? true
+    }
     private var revealAutomatically: Bool {
         UserDefaults.standard.object(forKey: Self.revealInFinderKey) as? Bool ?? true
     }
@@ -51,9 +55,19 @@ final class MirrorStore: ObservableObject {
     private var sessionTokens: [String: String] = [:]
     private var sessionDevices: [String: ADBDevice] = [:]
     private var sessionOptions: [String: MirrorOptions] = [:]
+    /// Single-app windows ("identity|package") and the name their captures use.
+    private var appWindowTitles: [String: String] = [:]
+    /// A recording a single-app window is writing itself: its own virtual
+    /// display cannot be captured by another process.
+    private struct AppRecording {
+        let kind: String
+        let destination: URL
+        let source: URL
+    }
+    private var appRecordings: [String: AppRecording] = [:]
     private var actionObserver: NSObjectProtocol?
 
-    private func mirrorExecutable(for device: ADBDevice) throws -> URL {
+    func mirrorExecutable(for device: ADBDevice) throws -> URL {
         let source = Bundle.main.bundleURL.appendingPathComponent(
             "Contents/Helpers/LANADBMirror.app", isDirectory: true)
         let sourceBinary = source.appendingPathComponent("Contents/MacOS/scrcpy")
@@ -166,7 +180,8 @@ final class MirrorStore: ObservableObject {
                         url.lastPathComponent.hasPrefix("lanadb-snapshot-") ? url : nil
                 }
             DeviceActions.saveScreenshot(of: device, serial: session.endpoint,
-                                         fallback: fallback) { [weak self] url, error in
+                                         fallback: fallback, title: appWindowTitles[id],
+                                         frameOnly: appWindowTitles[id] != nil) { [weak self] url, error in
                 if let url {
                     self?.messages[id] = nil
                     self?.errors[id] = nil
@@ -174,6 +189,7 @@ final class MirrorStore: ObservableObject {
                     // opens by itself only when the user turned that on.
                     self?.notifyMirror(id: id, kind: "screenshot",
                                        success: true, message: "", path: url.path)
+                    if self?.copyAutomatically == true { Self.copyToClipboard(url) }
                     if self?.revealAutomatically == true {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                             self?.revealCapture(url, deviceID: id)
@@ -204,6 +220,9 @@ final class MirrorStore: ObservableObject {
             guard folders.contains(file.deletingLastPathComponent().path),
                   FileManager.default.fileExists(atPath: file.path) else { return }
             revealCapture(file, deviceID: id)
+        case "record", "gif" where appWindowTitles[id] != nil:
+            handleAppRecording(id: id, device: device, kind: action,
+                               info: notification.userInfo ?? [:])
         case "record", "gif":
             if let recorder = recordingProcesses[id] {
                 guard recordingKinds[id] == action else { return }
@@ -221,10 +240,11 @@ final class MirrorStore: ObservableObject {
 
     private func notifyMirror(id: String, kind: String, success: Bool, message: String,
                               recording: Bool? = nil, path: String? = nil,
-                              thumb: String? = nil) {
+                              thumb: String? = nil, recordTo: String? = nil) {
         guard let token = sessionTokens[id] else { return }
         var info: [String: Any] = ["token": token, "kind": kind,
                                    "success": success, "message": message]
+        if let recordTo { info["recordTo"] = recordTo }
         if let recording { info["recording"] = recording }
         if let path { info["path"] = path }
         if let thumb { info["thumb"] = thumb }
@@ -234,7 +254,7 @@ final class MirrorStore: ObservableObject {
 
     /// H.265 halves recordings at the same quality. It is tried on devices
     /// not known to lack a hardware encoder; a quick failure falls back.
-    private static func hevcKey(_ device: ADBDevice) -> String { "record.hevc." + device.identity }
+    static func hevcKey(_ device: ADBDevice) -> String { "record.hevc." + device.identity }
 
     private func startRecording(id: String, device: ADBDevice, session: MirrorSession,
                                 options: MirrorOptions, kind: String) {
@@ -297,7 +317,9 @@ final class MirrorStore: ObservableObject {
                           "--video-bit-rate=\(kbps)K",
                           "--audio-bit-rate=\(options.audioBitrateKbps)K"]
             if maxSize > 0 { arguments.append("--max-size=\(maxSize)") }
-            if !RecordingSettings.recordsAudio { arguments.append("--no-audio") }
+            // AAC rather than scrcpy's default Opus: chat apps (Feishu...) only
+            // send an MP4 with AAC sound as a playable video, not as a file.
+            arguments.append(RecordingSettings.recordsAudio ? "--audio-codec=aac" : "--no-audio")
         }
         recorder.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
@@ -351,30 +373,7 @@ final class MirrorStore: ObservableObject {
                         transport: current.transport, recording: false, ready: current.ready)
                 }
                 if success && isGIF {
-                    let webp = destination.pathExtension == "webp"
-                    let busy = "正在生成 GIF…"
-                    self.messages[id] = busy
-                    self.notifyMirror(id: id, kind: kind, success: true,
-                                      message: busy, recording: true)
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let conversionError: String?
-                        do {
-                            let gif = RecordingSettings.gif()
-                            if webp {
-                                try WebPConverter.convert(video: url, to: destination, options: gif)
-                            } else {
-                                try GIFConverter.convert(video: url, to: destination, options: gif)
-                            }
-                            conversionError = nil
-                        } catch {
-                            conversionError = error.localizedDescription
-                        }
-                        try? FileManager.default.removeItem(at: url)
-                        DispatchQueue.main.async {
-                            self.finishCapture(id: id, kind: kind, destination: destination,
-                                               error: conversionError)
-                        }
-                    }
+                    self.convertAnimation(id: id, kind: kind, source: url, destination: destination)
                 } else if success {
                     self.finishCapture(id: id, kind: kind, destination: destination, error: nil)
                 } else {
@@ -404,6 +403,109 @@ final class MirrorStore: ObservableObject {
         }
     }
 
+    /// Turns a recorded source video into the GIF or WebP, then saves it.
+    private func convertAnimation(id: String, kind: String, source: URL, destination: URL) {
+        let webp = destination.pathExtension == "webp"
+        let busy = "正在生成 GIF…"
+        messages[id] = busy
+        notifyMirror(id: id, kind: kind, success: true, message: busy, recording: true)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let conversionError: String?
+            do {
+                let gif = RecordingSettings.gif()
+                if webp {
+                    try WebPConverter.convert(video: source, to: destination, options: gif)
+                } else {
+                    try GIFConverter.convert(video: source, to: destination, options: gif)
+                }
+                conversionError = nil
+            } catch {
+                conversionError = error.localizedDescription
+            }
+            try? FileManager.default.removeItem(at: source)
+            DispatchQueue.main.async {
+                self.finishCapture(id: id, kind: kind, destination: destination,
+                                   error: conversionError)
+            }
+        }
+    }
+
+    // MARK: Single-app windows
+
+    func registerAppWindow(key: String, device: ADBDevice, transport: ADBTransport,
+                           process: Process, token: String, options: MirrorOptions,
+                           title: String) {
+        processes[key] = process
+        sessionTokens[key] = token
+        sessionDevices[key] = device
+        sessionOptions[key] = options
+        sessions[key] = MirrorSession(endpoint: transport.endpoint, transport: transport.type,
+                                      recording: false)
+        appWindowTitles[key] = title
+    }
+
+    func unregisterAppWindow(key: String) {
+        processes.removeValue(forKey: key)
+        sessionTokens.removeValue(forKey: key)
+        sessionDevices.removeValue(forKey: key)
+        sessionOptions.removeValue(forKey: key)
+        sessions.removeValue(forKey: key)
+        appWindowTitles.removeValue(forKey: key)
+        messages.removeValue(forKey: key)
+        if let recording = appRecordings.removeValue(forKey: key), recording.kind == "gif" {
+            try? FileManager.default.removeItem(at: recording.source)
+        }
+    }
+
+    /// Start: picks the file and hands it to the window, which records its own
+    /// stream. Stop: the window has finished the file ("finished").
+    private func handleAppRecording(id: String, device: ADBDevice, kind: String,
+                                    info: [AnyHashable: Any]) {
+        let title = appWindowTitles[id]
+        if let recording = appRecordings[id] {
+            guard recording.kind == kind else { return }
+            appRecordings.removeValue(forKey: id)
+            if let current = sessions[id] {
+                sessions[id] = MirrorSession(endpoint: current.endpoint, transport: current.transport,
+                                             recording: false, ready: current.ready)
+            }
+            if info["failed"] as? String == "1" {
+                try? FileManager.default.removeItem(at: recording.source)
+                return
+            }
+            guard info["finished"] as? String == "1",
+                  FileManager.default.fileExists(atPath: recording.source.path) else {
+                try? FileManager.default.removeItem(at: recording.source)
+                finishCapture(id: id, kind: kind, destination: recording.destination,
+                              error: "录制失败，请重试。")
+                return
+            }
+            if kind == "gif" {
+                convertAnimation(id: id, kind: kind, source: recording.source,
+                                 destination: recording.destination)
+            } else {
+                finishCapture(id: id, kind: kind, destination: recording.destination, error: nil)
+            }
+            return
+        }
+        let isGIF = kind == "gif"
+        guard let destination = isGIF ? DeviceActions.gifDestination(for: device, title: title) :
+                DeviceActions.recordingDestination(for: device, title: title) else {
+            notifyMirror(id: id, kind: kind, success: false,
+                         message: "保存位置无法写入，请在设置中更换。", recording: false)
+            return
+        }
+        let source = isGIF ? FileManager.default.temporaryDirectory
+            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).mp4") : destination
+        appRecordings[id] = AppRecording(kind: kind, destination: destination, source: source)
+        if let current = sessions[id] {
+            sessions[id] = MirrorSession(endpoint: current.endpoint, transport: current.transport,
+                                         recording: true, ready: current.ready)
+        }
+        notifyMirror(id: id, kind: kind, success: true, message: "正在录制。", recording: true,
+                     recordTo: source.path)
+    }
+
     private func finishCapture(id: String, kind: String, destination: URL, error: String?) {
         if let error {
             notifyMirror(id: id, kind: kind, success: false, message: error, recording: false)
@@ -412,6 +514,7 @@ final class MirrorStore: ObservableObject {
         messages[id] = nil
         errors[id] = nil
         let reveal = revealAutomatically
+        if copyAutomatically { Self.copyToClipboard(destination) }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // A still of the recording for the thumbnail in the mirror window.
             let thumb = kind == "gif" ? destination : Self.posterFrame(for: destination)
@@ -422,6 +525,22 @@ final class MirrorStore: ObservableObject {
                 if reveal { self.revealCapture(destination, deviceID: id) }
             }
         }
+    }
+
+    /// Puts a saved capture on the clipboard the way Finder's Copy does, so
+    /// pasting into a chat sends the file itself (a video as a playable video,
+    /// a GIF or WebP as an animation). A screenshot also carries its PNG data,
+    /// for apps that paste images but not files (Notes, Preview, documents);
+    /// both live in one pasteboard item, so it pastes once.
+    private static func copyToClipboard(_ url: URL) {
+        let item = NSPasteboardItem()
+        item.setString(url.absoluteString, forType: .fileURL)
+        if url.pathExtension.lowercased() == "png", let data = try? Data(contentsOf: url) {
+            item.setData(data, forType: .png)
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects([item])
     }
 
     private static func posterFrame(for video: URL) -> URL? {
@@ -450,6 +569,16 @@ final class MirrorStore: ObservableObject {
         if (try? opener.run()) == nil {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
+    }
+
+    /// H.265 only where the device encodes it: emulators have just a software
+    /// encoder that fails, and a device that failed once is remembered.
+    static func effectiveCodec(_ codec: String, for device: ADBDevice) -> String {
+        if codec == "h265",
+           device.emulator || UserDefaults.standard.object(forKey: hevcKey(device)) as? Bool == false {
+            return "h264"
+        }
+        return codec
     }
 
     static func preferredTransports(for device: ADBDevice) -> [ADBTransport] {
@@ -518,12 +647,7 @@ final class MirrorStore: ObservableObject {
         }
 
         var options = options
-        // H.265 only where the device encodes it: emulators have just a software
-        // encoder that fails, and a device that failed once is remembered.
-        if options.videoCodec == "h265",
-           device.emulator || UserDefaults.standard.object(forKey: Self.hevcKey(device)) as? Bool == false {
-            options.videoCodec = "h264"
-        }
+        options.videoCodec = Self.effectiveCodec(options.videoCodec, for: device)
         let process = Process()
         process.executableURL = scrcpy
         process.currentDirectoryURL = tools

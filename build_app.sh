@@ -44,8 +44,11 @@ webp=/opt/homebrew/opt/webp
   -Xlinker "$webp/lib/libsharpyuv.a" \
   -o "$app/Contents/MacOS/LANADBManager" \
   native/ADBManagerApp.swift native/Theme.swift native/MirrorStore.swift native/DeviceActions.swift \
-  native/GIFConverter.swift native/WebPConverter.swift
+  native/GIFConverter.swift native/WebPConverter.swift \
+  native/AppWindows.swift native/AppPicker.swift native/DeviceLogs.swift
 /bin/cp native/Info.plist "$app/Contents/Info.plist"
+# Reads app icons on the device for the app picker (run, then deleted there).
+/bin/cp android/icons/lanadb-icons.dex "$app/Contents/Resources/lanadb-icons.dex"
 # CI passes its run number so every build has a distinct build version.
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$app/Contents/Info.plist"

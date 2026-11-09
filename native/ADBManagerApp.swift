@@ -821,6 +821,8 @@ struct DeviceDetail: View {
     let device: ADBDevice
     @ObservedObject private var mirror = MirrorStore.shared
     @ObservedObject private var info = DeviceInfoStore.shared
+    @ObservedObject private var appWindows = AppWindowStore.shared
+    @State private var pickingApp = false
     @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
     @AppStorage("mirror.maxFPS") private var maxFPS = 60
@@ -847,6 +849,8 @@ struct DeviceDetail: View {
             VStack(alignment: .leading, spacing: 26) {
                 header
                 if let error = mirror.errors[device.id] {
+                    Banner(text: error)
+                } else if let error = appWindows.errors[device.id], !pickingApp {
                     Banner(text: error)
                 } else if let message = mirror.messages[device.id] {
                     Banner(text: message, symbol: "record.circle", tint: Theme.recording)
@@ -877,8 +881,33 @@ struct DeviceDetail: View {
                 chips
             }
             Spacer(minLength: 12)
+            tools
             mirrorControl
         }
+        .sheet(isPresented: $pickingApp) {
+            AppPickerView(device: device, options: mirrorOptions)
+        }
+    }
+
+    /// Secondary tools beside the main mirror action.
+    private var tools: some View {
+        HStack(spacing: 8) {
+            Button {
+                appWindows.errors[device.id] = nil
+                pickingApp = true
+            } label: {
+                Label("应用", systemImage: "macwindow.on.rectangle")
+            }
+            .help("把手机上的某个应用单独开成一个 Mac 窗口，不影响手机屏幕")
+            Button {
+                DeviceLogWindows.show(device)
+            } label: {
+                Label("日志", systemImage: "list.bullet.rectangle.portrait")
+            }
+            .help("查看这台设备的实时日志")
+        }
+        .controlSize(.large)
+        .disabled(!device.connected)
     }
 
     private var chips: some View {
@@ -1094,6 +1123,7 @@ struct MirrorSettingsView: View {
     @AppStorage("mirror.videoCodec") private var videoCodec = "h265"
     @AppStorage(DeviceActions.directoryKey) private var saveDirectory = ""
     @AppStorage(MirrorStore.revealInFinderKey) private var revealInFinder = true
+    @AppStorage(MirrorStore.copyToClipboardKey) private var copyToClipboard = true
     @AppStorage(RecordingSettings.qualityKey) private var recordQuality = "standard"
     @AppStorage(RecordingSettings.formatKey) private var recordFormat = "mp4"
     @AppStorage(RecordingSettings.audioKey) private var recordAudio = true
@@ -1171,6 +1201,7 @@ struct MirrorSettingsView: View {
                         }
                     }
                     Toggle("保存后在访达中显示", isOn: $revealInFinder)
+                    Toggle("保存后复制到剪贴板", isOn: $copyToClipboard)
                 } header: {
                     Text("截图与录屏")
                 }
@@ -1202,7 +1233,7 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(height: 472)
+            .frame(height: 510)
             .tabItem { Label("录制", systemImage: "record.circle") }
         }
         .frame(width: 540)
@@ -1516,6 +1547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         MirrorStore.shared.stopAll()
+        AppWindowStore.shared.closeAll()
         DiscoveryMonitor.stopAll()
     }
 

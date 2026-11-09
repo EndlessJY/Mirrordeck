@@ -31,6 +31,7 @@ src = [
     'src/packet_merger.c',
     'src/receiver.c',
     'src/recorder.c',
+    'src/lanadb_record.c',
     'src/scrcpy.c',
     'src/screen.c',
     'src/sdl_hints.c',

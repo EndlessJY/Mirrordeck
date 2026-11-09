@@ -24,6 +24,7 @@
 #include "keyboard_sdk.h"
 #include "mouse_sdk.h"
 #include "recorder.h"
+#include "lanadb_record.h"
 #include "screen.h"
 #include "sdl_hints.h"
 #include "server.h"
@@ -874,6 +875,14 @@ aoa_complete:
 
         sc_packet_source_add_sink(&s->video_demuxer.packet_source,
                                   &s->video_decoder.packet_sink);
+        // LANADB: single-app windows record their own stream on request.
+        const char *app_window = getenv("LANADB_APP_WINDOW");
+        if (app_window && !strcmp(app_window, "1") && !options->record_filename) {
+            struct sc_packet_sink *record_sink = lanadb_record_sink();
+            if (record_sink) {
+                sc_packet_source_add_sink(&s->video_demuxer.packet_source, record_sink);
+            }
+        }
 
         if (!sc_decoder_start(&s->video_decoder)) {
             goto end;
