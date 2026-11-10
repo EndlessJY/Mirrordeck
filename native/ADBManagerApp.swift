@@ -360,19 +360,31 @@ final class DeviceStore: ObservableObject {
     /// Set by the app's launch and by every ADB device change: the next scan
     /// turns on wireless ADB for USB devices that do not have it yet.
     private var usbCheckPending = true
+    /// A sweep of the whole subnet's ADB ports is running (only on request,
+    /// or periodically when the user turned that on).
+    @Published private(set) var scanningNetwork = false
+
+    /// Off by default: probing every address of the network looks like a port
+    /// scan to company security tools. Devices are found without it through
+    /// wireless-debugging broadcasts, USB, remembered addresses and emulators.
+    static let subnetScanKey = "discovery.subnetScan"
+    private var autoSubnet: Bool { UserDefaults.standard.bool(forKey: Self.subnetScanKey) }
 
     init() {
-        // Show already-connected and Bonjour devices first, then sweep legacy
-        // ports without making the first usable device wait for the subnet.
+        // Show already-connected and broadcasting devices first; a second
+        // pass a moment later settles macOS local-network access.
         scan(full: false)
-        pendingScan = true
+        pendingScan = autoSubnet
         let monitor = DiscoveryMonitor()
         monitor.onADBChange = { [weak self] in
             self?.usbCheckPending = true
             self?.requestScan(full: false)
         }
         monitor.onBonjourChange = { [weak self] in self?.requestScan(full: false) }
-        monitor.onNetworkChange = { [weak self] in self?.requestScan(full: true) }
+        monitor.onNetworkChange = { [weak self] in
+            guard let self else { return }
+            self.requestScan(full: self.autoSubnet)
+        }
         self.monitor = monitor
         monitor.start()
     }
@@ -407,11 +419,17 @@ final class DeviceStore: ObservableObject {
         let needsRecovery = report?.devices.isEmpty != false || report?.issues.isEmpty == false
         timer = Timer.scheduledTimer(withTimeInterval: needsRecovery ? 45 : 90,
                                      repeats: false) { [weak self] _ in
-            self?.scan(full: true)
+            guard let self else { return }
+            self.scan(full: self.autoSubnet)
         }
     }
 
-    func scan(full: Bool = true) {
+    /// Probes the subnet's common ADB ports once, at the user's request.
+    func scanNetwork() {
+        requestScan(full: true, delay: 0)
+    }
+
+    func scan(full: Bool) {
         guard !busy else {
             pendingScan = (pendingScan ?? false) || full
             return
@@ -421,16 +439,18 @@ final class DeviceStore: ObservableObject {
         scheduledFull = false
         timer?.invalidate()
         scanning = true
+        scanningNetwork = full
         error = nil
-        phase = report == nil ? "正在发现设备…" :
-                full ? "正在发现并连接设备…" : "正在更新设备…"
+        if report == nil { phase = "正在发现设备…" }
+        if full { phase = "正在刷新设备…" }
         let usbCheck = usbCheckPending
         usbCheckPending = false
         Worker.run(full ? "scan" : "scan_fast",
                    payload: usbCheck ? ["usb_check": "1"] : [:]) { [weak self] result in
             guard let self else { return }
             self.scanning = false
-            if full { self.initialSweepDone = true }
+            self.scanningNetwork = false
+            if full || !self.initialSweepPending { self.initialSweepDone = true }
             var needsImmediateRecovery = false
             switch result {
             case .success(let response):
@@ -461,9 +481,8 @@ final class DeviceStore: ObservableObject {
                         self.lastRecoverySweep = Date()
                     }
                     self.report = report
-                    self.phase = "上次扫描 " +
-                        Date().formatted(date: .omitted, time: .shortened) +
-                        " · 用时 \(String(format: "%.1f", report.durationSeconds)) 秒"
+                    let count = report.devices.count
+                    self.phase = count == 0 ? "未发现设备" : "已连接 \(count) 台设备"
                     let valid = Set(report.devices.map { "device:" + $0.identity } +
                                     report.issues.map { $0.id })
                     if self.selectedID == nil || !valid.contains(self.selectedID!) {
@@ -482,16 +501,17 @@ final class DeviceStore: ObservableObject {
                 // The user's request goes first; it schedules the next scan.
                 self.queuedAction = nil
                 self.actionQueued = false
-                if needsImmediateRecovery { self.pendingScan = true }
+                if needsImmediateRecovery { self.pendingScan = self.autoSubnet }
                 action()
             } else if let pending = self.pendingScan {
                 self.pendingScan = nil
                 let delay: TimeInterval = needsImmediateRecovery ? 0.25 :
                     (self.initialSweepPending && pending ? 3 : 0.45)
                 self.initialSweepPending = false
-                self.requestScan(full: pending || needsImmediateRecovery, delay: delay)
+                self.requestScan(full: pending || (needsImmediateRecovery && self.autoSubnet),
+                                 delay: delay)
             } else if needsImmediateRecovery {
-                self.requestScan(full: true, delay: 0.25)
+                self.requestScan(full: self.autoSubnet, delay: 0.25)
             } else {
                 self.scheduleFallback()
             }
@@ -1085,32 +1105,76 @@ struct DeviceDetail: View {
                 Card(title: section.title) {
                     ForEach(Array(section.items.enumerated()), id: \.element.label) { index, item in
                         if index > 0 { CardDivider() }
-                        infoRow(item)
+                        InfoRow(item: item)
                     }
                 }
             }
         }
     }
 
-    /// Label on the left, value on the right; long technical strings stay on
-    /// one line, hovering shows the whole value and selecting copies it.
-    private func infoRow(_ item: DeviceInfoSection.Item) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(item.label).foregroundStyle(.secondary).fixedSize()
-            Spacer(minLength: 8)
-            if item.value.contains("\n") {
-                Text(item.value).multilineTextAlignment(.trailing).textSelection(.enabled)
-            } else {
-                Text(item.value)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .help(item.value)
+}
+
+/// Label on the left, value on the right; long technical strings stay on one
+/// line. Clicking the row copies the value; "已复制" shows in its place.
+struct InfoRow: View {
+    let item: DeviceInfoSection.Item
+    @State private var hovering = false
+    @State private var copied = false
+    @State private var resetTask: DispatchWorkItem?
+
+    var body: some View {
+        Button(action: copy) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(item.label).foregroundStyle(.secondary).fixedSize()
+                Spacer(minLength: 8)
+                ZStack(alignment: .trailing) {
+                    value.opacity(copied ? 0 : 1)
+                    if copied {
+                        Label("已复制", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.online)
+                            .fontWeight(.medium)
+                            .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                    }
+                }
             }
+            .font(.callout)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(hovering ? 0.05 : 0))
+                    .padding(.horizontal, 4)
+            )
         }
-        .font(.callout)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hovering = inside
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .help(item.value.contains("\n") ? "点按复制" : "\(item.value)\n点按复制")
+        .animation(Theme.quick, value: copied)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    @ViewBuilder
+    private var value: some View {
+        if item.value.contains("\n") {
+            Text(item.value).multilineTextAlignment(.trailing)
+        } else {
+            Text(item.value).lineLimit(1).truncationMode(.middle)
+        }
+    }
+
+    private func copy() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(item.value, forType: .string)
+        copied = true
+        resetTask?.cancel()
+        let task = DispatchWorkItem { copied = false }
+        resetTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: task)
     }
 }
 
@@ -1129,6 +1193,7 @@ struct MirrorSettingsView: View {
     @AppStorage(RecordingSettings.audioKey) private var recordAudio = true
     @AppStorage(RecordingSettings.gifQualityKey) private var gifQuality = "standard"
     @AppStorage(RecordingSettings.animatedFormatKey) private var animatedFormat = "webp"
+    @AppStorage(DeviceStore.subnetScanKey) private var subnetScan = false
 
     private var saveURL: URL { DeviceActions.saveDirectoryURL(saveDirectory) }
 
@@ -1183,9 +1248,14 @@ struct MirrorSettingsView: View {
                 } header: {
                     Text("音频")
                 }
+                Section {
+                    Toggle("定时刷新设备", isOn: $subnetScan)
+                } header: {
+                    Text("发现设备")
+                }
             }
             .formStyle(.grouped)
-            .frame(height: 375)
+            .frame(height: 452)
             .tabItem { Label("投屏", systemImage: "display") }
 
             Form {
@@ -1507,10 +1577,14 @@ struct ContentView: View {
                 .lineLimit(1)
                 .contentTransition(.opacity)
             Spacer()
-            if let report = store.report, !report.networks.isEmpty {
-                Label(report.networks.joined(separator: " · "), systemImage: "network")
-                    .help("正在扫描的局域网网段")
+            Button {
+                store.scanNetwork()
+            } label: {
+                Label("刷新设备", systemImage: "arrow.clockwise")
             }
+            .buttonStyle(.borderless)
+            .disabled(store.scanningNetwork)
+            .help("重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
