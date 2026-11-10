@@ -207,9 +207,29 @@ class USBWirelessTests(AdbTestCase):
 
     def test_routed_retry_does_not_bypass_identity_check(self):
         self.trusted_file.write_text(json.dumps({self.endpoint: self.serial}))
-        with self.device(usb=False, first_route_error=True, wireless_identity="other-phone") as (manager, state, calls):
+        # 明确满足重启冷却期，不依赖 Python 版本或机器的单调时钟起点。
+        with (
+            self.device(usb=False, first_route_error=True, wireless_identity="other-phone") as (manager, state, calls),
+            patch.object(adb_lan.time, "monotonic", return_value=120.0),
+        ):
             manager.save_known({self.endpoint: self.serial})
             manager.reconnect_known()
             self.assertIn(("kill-server",), calls)
             self.assertFalse(state["connected"])
             self.assertEqual(self.trusted(), {})
+
+    def test_routed_retry_respects_restart_cooldown(self):
+        for elapsed, should_restart in ((0, False), (60, False), (61, True)):
+            with (
+                self.subTest(elapsed=elapsed),
+                self.device(usb=False, first_route_error=True) as (manager, state, calls),
+                patch.object(adb_lan.time, "monotonic", return_value=120.0),
+            ):
+                manager.save_known({self.endpoint: self.serial})
+                manager.save_usb_wireless({self.endpoint: self.serial})
+                manager._last_server_restart = 120.0 - elapsed
+                self.assertEqual(manager.reconnect_known(), should_restart)
+                self.assertEqual(calls.count(("kill-server",)), int(should_restart))
+                self.assertEqual(calls.count(("connect", self.endpoint)), 2 if should_restart else 1)
+                self.assertEqual(state["connected"], should_restart)
+                self.assertEqual(self.trusted(), {self.endpoint: self.serial})

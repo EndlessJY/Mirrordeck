@@ -28,7 +28,7 @@ jobs:
         run: brew install python@3.13 meson ninja pkgconf dylibbundler sdl3 ffmpeg libusb webp
 
       - name: 单元测试
-        run: /usr/bin/python3 -m unittest discover -s tests -v
+        run: /opt/homebrew/opt/python@3.13/bin/python3.13 -m unittest discover -s tests -v
 
       - name: 构建应用
         env:
