@@ -165,13 +165,21 @@ final class AppWindowStore: ObservableObject {
                 }
                 self.apps[id] = parsed
             }
-            let pictures = Self.readIcons(serial: serial, packages: parsed.map(\.package),
-                                          adb: tools.appendingPathComponent("adb"))
+            let adb = tools.appendingPathComponent("adb")
+            var pictures = Self.readIcons(serial: serial, packages: parsed.map(\.package), adb: adb)
+            // An icon can fail once (the app was busy starting, say): ask again
+            // for just those.
+            let missing = parsed.map(\.package).filter { pictures[$0] == nil }
+            if !missing.isEmpty && missing.count < parsed.count {
+                pictures.merge(Self.readIcons(serial: serial, packages: missing, adb: adb)) { a, _ in a }
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading.remove(id)
-                self.iconData[id] = pictures
-                self.icons[id] = pictures.compactMapValues { NSImage(data: $0) }
+                // A reload never loses an icon read before.
+                let merged = (self.iconData[id] ?? [:]).merging(pictures) { _, new in new }
+                self.iconData[id] = merged
+                self.icons[id] = merged.compactMapValues { NSImage(data: $0) }
             }
         }
     }
