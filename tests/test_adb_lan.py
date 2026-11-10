@@ -92,6 +92,32 @@ class RecoveryTests(unittest.TestCase):
             report = manager.scan(include_subnet_scan=False)
         self.assertEqual(report["devices"], [])
 
+    def run_known_scan(self, port_is_open):
+        endpoint = "10.0.0.9:5555"
+        manager = AdbLan()
+        with (
+            patch.object(manager, "command", return_value=(0, "failed to connect: timed out")),
+            patch.object(manager, "devices", return_value={}),
+            patch.object(manager, "load_known", return_value={endpoint: "tv-serial"}),
+            patch.object(manager, "save_known"),
+            patch.object(manager, "_discover_emulators", return_value=[]),
+            patch.object(adb_lan, "port_open", return_value=port_is_open),
+            patch.object(adb_lan, "run_command", return_value=(
+                0, "en1: flags=1\n\tinet 10.0.0.3 netmask 0xffffff00\n"
+            )),
+            patch.object(adb_lan.time, "sleep"),
+        ):
+            return manager.scan(include_subnet_scan=False)
+
+    def test_offline_remembered_device_is_not_reported(self):
+        # A TV on standby: only its old address is known and nothing answers.
+        report = self.run_known_scan(port_is_open=False)
+        self.assertEqual(report["failed"], [])
+
+    def test_reachable_remembered_device_that_fails_is_reported(self):
+        report = self.run_known_scan(port_is_open=True)
+        self.assertEqual([item["endpoint"] for item in report["failed"]], ["10.0.0.9:5555"])
+
     def test_two_mumu_ports_share_one_emulator_identity(self):
         manager = AdbLan()
         manager.emulator_pids = {

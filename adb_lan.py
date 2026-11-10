@@ -934,6 +934,12 @@ class AdbLan:
                 state = after.get(endpoint, {}).get("state", "")
                 if state == "device":
                     continue
+                reachable = port_open(endpoint, 0.3)
+                # Only remembered from an earlier session and not reachable now:
+                # the device is simply off or away (a TV on standby), not a
+                # problem to show. It stays remembered and reconnects when back.
+                if set(sources) <= {"上次成功"} and not state and not reachable:
+                    continue
                 outcome = outcomes.get(endpoint, "")
                 reason = (
                     ("模拟器实例未运行或 ADB 端口已关闭"
@@ -945,7 +951,7 @@ class AdbLan:
                         "端口未开放" not in outcome and
                         state not in {"device", "offline"} and
                         "no route to host" not in outcome.lower()
-                     else explain_failure(outcome, state, port_open(endpoint, 0.3)))
+                     else explain_failure(outcome, state, reachable))
                 )
                 failed.append({
                     "endpoint": endpoint,
