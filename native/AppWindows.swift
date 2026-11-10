@@ -139,7 +139,7 @@ final class AppWindowStore: ObservableObject {
     /// `reload`.
     func load(_ device: ADBDevice, reload: Bool = false) {
         let id = device.identity
-        guard !loading.contains(id), reload || apps[id] == nil,
+        guard !device.isApple, !loading.contains(id), reload || apps[id] == nil,
               let serial = MirrorStore.preferredTransports(for: device).first?.endpoint,
               let tools else { return }
         let executable: URL

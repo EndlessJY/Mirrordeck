@@ -539,7 +539,7 @@ final class MirrorStore: ObservableObject {
     /// for apps that paste images but not files (Notes, Preview, documents);
     /// both live in one pasteboard item, so it pastes once.
     @discardableResult
-    private static func copyToClipboard(_ url: URL) -> Bool {
+    static func copyToClipboard(_ url: URL) -> Bool {
         let item = NSPasteboardItem()
         item.setString(url.absoluteString, forType: .fileURL)
         if url.pathExtension.lowercased() == "png", let data = try? Data(contentsOf: url) {

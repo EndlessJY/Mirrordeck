@@ -26,6 +26,10 @@ class AdbTestCase(unittest.TestCase):
             replacement = patch.object(adb_lan, name, value)
             replacement.start()
             self.addCleanup(replacement.stop)
+        # Never reach a real iPhone through this Mac's usbmuxd in tests.
+        apple = patch.object(adb_lan.ios_devices, "scan", return_value=([], []))
+        apple.start()
+        self.addCleanup(apple.stop)
 
 
 class ParserTests(unittest.TestCase):

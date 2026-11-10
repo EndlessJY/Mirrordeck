@@ -38,9 +38,14 @@ if [[ ! -x build/venv/bin/pyinstaller ]]; then
   "$python" -m venv build/venv
   build/venv/bin/python -m pip install --disable-pip-version-check 'pyinstaller==6.22.3'
 fi
+# iPhone / iPad over USB (device info, trust prompt, system log).
+ios_library='pymobiledevice3==11.50.3'
+build/venv/bin/python -m pip show pymobiledevice3 2>/dev/null | /usr/bin/grep -q '^Version: 11.50.3$' ||
+  build/venv/bin/python -m pip install --disable-pip-version-check "$ios_library"
 build/venv/bin/pyinstaller --noconfirm --onedir --console --target-arch arm64 \
   --name adb-worker --distpath build/pyinstaller-dist \
-  --workpath build/pyinstaller-build --specpath build/pyinstaller-spec worker.py
+  --workpath build/pyinstaller-build --specpath build/pyinstaller-spec \
+  --collect-submodules pymobiledevice3 --collect-data pymobiledevice3 worker.py
 
 if [[ -d "$app" ]]; then
   /bin/mv "$app" "build/previous-package-$(/bin/date +%Y%m%d%H%M%S).app"
@@ -58,7 +63,8 @@ webp=/opt/homebrew/opt/webp
   -o "$app/Contents/MacOS/LANADBManager" \
   native/ADBManagerApp.swift native/Theme.swift native/MirrorStore.swift native/DeviceActions.swift \
   native/GIFConverter.swift native/WebPConverter.swift \
-  native/AppWindows.swift native/AppPicker.swift native/DeviceLogs.swift
+  native/AppWindows.swift native/AppPicker.swift native/DeviceLogs.swift \
+  native/IOSDevices.swift native/IOSMirror.swift
 /bin/cp native/Info.plist "$app/Contents/Info.plist"
 # Reads app icons on the device for the app picker (run, then deleted there).
 /bin/cp android/icons/lanadb-icons.dex "$app/Contents/Resources/lanadb-icons.dex"

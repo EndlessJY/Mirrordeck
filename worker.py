@@ -3,6 +3,7 @@
 import json
 import sys
 
+import ios_devices
 from adb_lan import AdbLan, parse_interfaces, run_command
 
 
@@ -30,9 +31,16 @@ def main():
             str(payload.get("endpoint", "")).strip(),
             str(payload.get("code", "")).strip(),
         )})
+    elif action == "info" and payload.get("platform") == "ios":
+        emit({"info": {"sections": ios_devices.info(str(payload.get("serial", "")).strip()),
+                       "scope": "all"}})
     elif action == "info":
         emit({"info": manager.device_info(str(payload.get("serial", "")).strip(),
                                           str(payload.get("scope", "all")))})
+    elif action == "ios_syslog":
+        # Streams until the app stops this process (the log window closed).
+        ios_devices.stream_syslog(str(payload.get("serial", "")).strip(),
+                                  lambda line: print(line, flush=True))
     elif action == "forget":
         emit({"result": manager.forget(str(payload.get("endpoint", "")).strip())})
     elif action == "reconnect":

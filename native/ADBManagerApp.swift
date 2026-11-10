@@ -21,8 +21,12 @@ struct ADBDevice: Codable, Identifiable {
     let emulator: Bool
     var transports: [ADBTransport]
     var wireless: Bool
+    /// "ios" for an iPhone / iPad over USB; nil (Android) otherwise.
+    let platform: String?
+    let deviceClass: String?
 
     var id: String { identity }
+    var isApple: Bool { platform == "ios" }
     var connected: Bool { transports.contains { $0.state == "已连接" } }
     /// Prefers the retail name ("Xiaomi Civi 4 Pro") over the model code.
     var title: String {
@@ -47,7 +51,10 @@ struct ADBDevice: Codable, Identifiable {
         }
         return "无线已连接"
     }
-    var symbol: String { emulator ? "macwindow" : tv == true ? "tv" : "smartphone" }
+    var symbol: String {
+        if isApple { return deviceClass == "iPad" ? "ipad" : "iphone" }
+        return emulator ? "macwindow" : tv == true ? "tv" : "smartphone"
+    }
 }
 
 struct ADBFailure: Codable {
@@ -88,12 +95,17 @@ struct ADBReport: Codable {
                       source: $0.sources.joined(separator: " · "), endpoint: $0.endpoint)
         }
         let usbItems = usbIssues.map {
-            IssueItem(id: "usb:" + $0.serial, title: $0.serial,
+            IssueItem(id: "usb:" + $0.serial,
+                      title: $0.state.hasPrefix("ios_") ? "iPhone（\($0.serial.prefix(8))…）" : $0.serial,
                       summary: $0.state == "unauthorized" ? "请在设备上允许 USB 调试" :
                                $0.state == "no_lan_ip" ? "未找到可用于自动无线 ADB 的 Wi-Fi 地址" :
                                $0.state == "tcpip_unreachable" ?
                                    "已尝试开启无线 ADB，但 5555 端口不可达；检查路由器 AP 隔离或防火墙" :
-                               $0.state == "offline" ? "设备离线，请解锁或启动模拟器" : $0.state,
+                               $0.state == "offline" ? "设备离线，请解锁或启动模拟器" :
+                               $0.state == "ios_untrusted" ? "请在 iPhone 上点“信任”，并输入锁屏密码" :
+                               $0.state == "ios_locked" ? "请解锁 iPhone，然后在弹出的提示中点“信任”" :
+                               $0.state == "ios_denied" ? "已在 iPhone 上选择“不信任”；重新插拔数据线后再试" :
+                               $0.state == "ios_unavailable" ? "暂时无法读取这台 iPhone，请重新插拔数据线" : $0.state,
                       detail: "", source: $0.kind ?? "USB", endpoint: nil)
         }
         let pairItems = pairing.map {
@@ -199,6 +211,7 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.network")
     private var tracker: Process?
+    private let appleMonitor = AppleDeviceMonitor()
     private var stopped = false
     private var lastPathSignature: String?
     private static let instances = NSHashTable<DiscoveryMonitor>.weakObjects()
@@ -231,6 +244,9 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
         }
         networkMonitor.start(queue: networkQueue)
         startADBTracker()
+        // iPhones / iPads plugged in or out count as a device change.
+        appleMonitor.onChange = { [weak self] in self?.onADBChange?() }
+        appleMonitor.start()
     }
 
     private static func signature(of path: NWPath) -> String {
@@ -284,6 +300,7 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
 
     func stop() {
         stopped = true
+        appleMonitor.stop()
         browsers.forEach { $0.stop() }
         browsers.removeAll()
         networkMonitor.cancel()
@@ -653,9 +670,10 @@ struct DeviceSidebarRow: View {
     let device: ADBDevice
     let selected: Bool
     @ObservedObject private var mirror = MirrorStore.shared
+    @ObservedObject private var iosMirror = IOSMirrorStore.shared
 
     var body: some View {
-        let live = mirror.sessions[device.id] != nil
+        let live = mirror.sessions[device.id] != nil || iosMirror.open.contains(device.id)
         SidebarRowContent(symbol: device.symbol, tint: Theme.accent,
                           title: device.title,
                           subtitle: live ? "投屏中 · " + device.connectionSummary :
@@ -680,17 +698,20 @@ struct IssueSidebarRow: View {
 /// Sidebar section title with a count.
 struct SidebarHeader: View {
     let title: String
-    let count: Int
+    /// nil before the first result: no number yet.
+    let count: Int?
     var searching = false
 
     var body: some View {
         HStack(spacing: 6) {
             Text(title)
-            Text("\(count)")
-                .font(.caption2.weight(.semibold).monospacedDigit())
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            if let count {
+                Text("\(count)")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
             if searching {
                 Spacer()
                 ProgressView().controlSize(.mini)
@@ -777,7 +798,8 @@ final class DeviceInfoStore: ObservableObject {
         loading.insert(id)
         let scope = needsFull ? "all" : "dynamic"
         if needsFull { fullLoading.insert(id) }
-        Worker.run("info", payload: ["serial": serial, "scope": scope]) { [weak self] result in
+        Worker.run("info", payload: ["serial": serial, "scope": scope,
+                                     "platform": device.platform ?? "android"]) { [weak self] result in
             guard let self else { return }
             self.loading.remove(id)
             self.fullLoading.remove(id)
@@ -842,6 +864,7 @@ struct DeviceDetail: View {
     @ObservedObject private var mirror = MirrorStore.shared
     @ObservedObject private var info = DeviceInfoStore.shared
     @ObservedObject private var appWindows = AppWindowStore.shared
+    @ObservedObject private var iosMirror = IOSMirrorStore.shared
     @State private var pickingApp = false
     @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
@@ -859,6 +882,10 @@ struct DeviceDetail: View {
 
     private enum MirrorState: Equatable { case idle, starting, live }
     private var mirrorState: MirrorState {
+        if device.isApple {
+            if iosMirror.starting.contains(device.id) { return .starting }
+            return iosMirror.open.contains(device.id) ? .live : .idle
+        }
         if mirror.starting.contains(device.id) { return .starting }
         guard let session = mirror.sessions[device.id] else { return .idle }
         return session.ready ? .live : .starting
@@ -868,7 +895,9 @@ struct DeviceDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 header
-                if let error = mirror.errors[device.id] {
+                if device.isApple, let error = iosMirror.errors[device.id] {
+                    Banner(text: error)
+                } else if let error = mirror.errors[device.id] {
                     Banner(text: error)
                 } else if let error = appWindows.errors[device.id], !pickingApp {
                     Banner(text: error)
@@ -912,13 +941,16 @@ struct DeviceDetail: View {
     /// Secondary tools beside the main mirror action.
     private var tools: some View {
         HStack(spacing: 8) {
-            Button {
-                appWindows.errors[device.id] = nil
-                pickingApp = true
-            } label: {
-                Label("应用", systemImage: "macwindow.on.rectangle")
+            // iOS has no way to show one app on its own screen.
+            if !device.isApple {
+                Button {
+                    appWindows.errors[device.id] = nil
+                    pickingApp = true
+                } label: {
+                    Label("应用", systemImage: "macwindow.on.rectangle")
+                }
+                .help("把手机上的某个应用单独开成一个 Mac 窗口，不影响手机屏幕")
             }
-            .help("把手机上的某个应用单独开成一个 Mac 窗口，不影响手机屏幕")
             Button {
                 DeviceLogWindows.show(device)
             } label: {
@@ -964,13 +996,13 @@ struct DeviceDetail: View {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
                 Text("正在启动投屏…").font(.callout).foregroundStyle(.secondary)
-                Button("取消") { mirror.stop(deviceID: device.id) }
+                Button("取消") { stopMirror() }
                     .controlSize(.large)
             }
             .transition(.opacity)
         case .live:
             Button {
-                mirror.stop(deviceID: device.id)
+                stopMirror()
             } label: {
                 Label("结束投屏", systemImage: "stop.fill")
             }
@@ -979,7 +1011,11 @@ struct DeviceDetail: View {
             .transition(.opacity)
         case .idle:
             Button {
-                mirror.start(device: device, options: mirrorOptions)
+                if device.isApple {
+                    iosMirror.start(device: device)
+                } else {
+                    mirror.start(device: device, options: mirrorOptions)
+                }
             } label: {
                 Label("投屏", systemImage: "play.fill")
                     .padding(.horizontal, 6)
@@ -989,9 +1025,14 @@ struct DeviceDetail: View {
             .tint(Theme.accent)
             .disabled(!device.connected)
             .keyboardShortcut(.defaultAction)
-            .help("在 Mac 上显示并操作这台设备（↩）")
+            .help(device.isApple ? "在 Mac 上显示这台设备的画面和声音（↩）" :
+                    "在 Mac 上显示并操作这台设备（↩）")
             .transition(.opacity)
         }
+    }
+
+    private func stopMirror() {
+        if device.isApple { iosMirror.stop(deviceID: device.id) } else { mirror.stop(deviceID: device.id) }
     }
 
     // MARK: Connections
@@ -1034,7 +1075,7 @@ struct DeviceDetail: View {
     /// The info sections plus the ADB identity when it differs from the serial.
     private var displaySections: [DeviceInfoSection] {
         var sections = info.sections[device.id] ?? []
-        if !sections.isEmpty, info.value("序列号", for: device.id) != device.identity {
+        if !device.isApple, !sections.isEmpty, info.value("序列号", for: device.id) != device.identity {
             sections.append(DeviceInfoSection(title: "识别",
                                               items: [.init(label: "ADB 标识", value: device.identity)]))
         }
@@ -1450,6 +1491,10 @@ struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
     @StateObject private var store = DeviceStore()
     @State private var activeSheet: ActionRequest?
+    /// The sidebar stays closed until the first scan has a result, then
+    /// slides open, so launch shows one calm loading state instead of an
+    /// empty column.
+    @State private var columns: NavigationSplitViewVisibility = .detailOnly
 
     private var selectedDevice: ADBDevice? {
         store.report?.devices.first { "device:" + $0.identity == store.selectedID }
@@ -1459,7 +1504,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columns) {
             // Rows draw their own selection; List's native highlight would sit
             // underneath as a second, differently coloured layer.
             List {
@@ -1548,6 +1593,10 @@ struct ContentView: View {
         }
         .tint(Theme.accent)
         .frame(minWidth: 720, minHeight: 500)
+        .onChange(of: store.report != nil) { _, ready in
+            guard ready, columns == .detailOnly else { return }
+            withAnimation(.spring(duration: 0.45, bounce: 0.12)) { columns = .all }
+        }
         .sheet(item: $activeSheet) { request in
             ActionSheetView(mode: request.mode, suggestedEndpoint: request.endpoint)
                 .environmentObject(store)
@@ -1616,11 +1665,14 @@ struct LANADBManagerApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // iPhones then appear as capture devices by the time one is mirrored.
+        IOSMirrorStore.enableScreenCaptureDevices()
         DispatchQueue.global(qos: .utility).async { DeviceActions.removeTemporaryFiles() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         MirrorStore.shared.stopAll()
+        IOSMirrorStore.shared.stopAll()
         AppWindowStore.shared.closeAll()
         DiscoveryMonitor.stopAll()
     }

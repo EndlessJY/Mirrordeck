@@ -106,19 +106,52 @@ final class DeviceLogStore: ObservableObject {
         return environment
     }
 
+    /// iPhone / iPad: the worker streams the system log in logcat's format.
+    private func appleLogProcess() -> (Process, Pipe)? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let worker = resources.appendingPathComponent("Worker/adb-worker")
+        guard FileManager.default.isExecutableFile(atPath: worker.path) else { return nil }
+        let process = Process()
+        process.executableURL = worker
+        process.arguments = ["ios_syslog"]
+        process.currentDirectoryURL = worker.deletingLastPathComponent()
+        var environment = environment()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONUNBUFFERED"] = "1"
+        process.environment = environment
+        let input = Pipe()
+        process.standardInput = input
+        let request = (try? JSONSerialization.data(withJSONObject: ["serial": device.identity])) ?? Data()
+        input.fileHandleForWriting.write(request)
+        input.fileHandleForWriting.closeFile()
+        return (process, input)
+    }
+
     func start() {
-        guard process == nil, let adb,
-              let serial = MirrorStore.preferredTransports(for: device).first?.endpoint else {
+        guard process == nil, device.connected else {
             stopReason = "设备未连接。"
             return
         }
-        self.serial = serial
+        let process: Process
+        if device.isApple {
+            guard let (worker, _) = appleLogProcess() else {
+                stopReason = "应用内的日志组件缺失，请重新安装。"
+                return
+            }
+            process = worker
+        } else {
+            guard let adb, let serial = MirrorStore.preferredTransports(for: device).first?.endpoint else {
+                stopReason = "设备未连接。"
+                return
+            }
+            self.serial = serial
+            process = Process()
+            process.executableURL = adb
+            // The last 1000 lines first, then live.
+            process.arguments = ["-s", serial, "logcat", "-v", "threadtime", "-T", "1000"]
+            process.environment = environment()
+        }
         stopReason = nil
-        let process = Process()
-        process.executableURL = adb
-        // The last 1000 lines first, then live.
-        process.arguments = ["-s", serial, "logcat", "-v", "threadtime", "-T", "1000"]
-        process.environment = environment()
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -302,7 +335,7 @@ struct DeviceLogView: View {
         .frame(minWidth: 760, minHeight: 420)
         .onAppear {
             store.start()
-            apps.load(store.device)
+            if !store.device.isApple { apps.load(store.device) }
         }
         .onDisappear { store.stop() }
     }
@@ -317,16 +350,18 @@ struct DeviceLogView: View {
             }
             .labelsHidden()
             .fixedSize()
-            Picker("应用", selection: $store.appFilter) {
-                Text("全部应用").tag(String?.none)
-                let list = apps.apps[store.device.id] ?? []
-                if !list.isEmpty { Divider() }
-                ForEach(list) { app in
-                    Text(app.label).tag(Optional(app.package))
+            if !store.device.isApple {
+                Picker("应用", selection: $store.appFilter) {
+                    Text("全部应用").tag(String?.none)
+                    let list = apps.apps[store.device.id] ?? []
+                    if !list.isEmpty { Divider() }
+                    ForEach(list) { app in
+                        Text(app.label).tag(Optional(app.package))
+                    }
                 }
+                .labelsHidden()
+                .frame(maxWidth: 170)
             }
-            .labelsHidden()
-            .frame(maxWidth: 170)
             Toggle("只看崩溃", isOn: $crashesOnly)
                 .toggleStyle(.button)
             Spacer(minLength: 0)

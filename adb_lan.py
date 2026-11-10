@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+import ios_devices
+
 
 APP_DIR = Path.home() / "Library" / "Application Support" / "LAN ADB Manager"
 KNOWN_FILE = APP_DIR / "known_endpoints.json"
@@ -1049,11 +1051,15 @@ class AdbLan:
                     "reason": reason,
                     "detail": outcome[:220],
                 })
+            # iPhone / iPad over USB (usbmuxd on this Mac; no network traffic).
+            self.progress("读取通过 USB 连接的苹果设备")
+            apple_devices, apple_issues = ios_devices.scan()
+            usb_issues.extend(apple_issues)
             return {
                 # A stable order keeps rows from jumping when a transport changes.
                 "devices": sorted(devices.values(), key=lambda d: (
                     d["emulator"], d["model"].lower(), d["identity"]
-                )),
+                )) + apple_devices,
                 "failed": failed,
                 "usb_issues": usb_issues,
                 "pairing": pairing,
