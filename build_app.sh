@@ -68,9 +68,14 @@ webp=/opt/homebrew/opt/webp
 /bin/cp native/Info.plist "$app/Contents/Info.plist"
 # Reads app icons on the device for the app picker (run, then deleted there).
 /bin/cp android/icons/lanadb-icons.dex "$app/Contents/Resources/lanadb-icons.dex"
-# CI passes its run number so every build has a distinct build version.
+# CI passes its run number: every build is its own version, "4.0.<run>"
+# (major.minor from native/Info.plist), shown in About and on its release.
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
+  base=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" native/Info.plist | cut -d. -f1-2)
+  version="$base.$BUILD_NUMBER"
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+  echo "版本：$version"
 fi
 /usr/bin/ditto build/pyinstaller-dist/adb-worker "$app/Contents/Resources/Worker"
 mkdir -p "$app/Contents/Resources/Tools"

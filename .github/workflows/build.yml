@@ -50,15 +50,26 @@ jobs:
             build/Mirrordeck-macOS-arm64.zip.sha256
           if-no-files-found: error
 
-      - name: 更新“最新构建”下载
+      - name: 发布新版本
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "build/幕台.app/Contents/Info.plist")
-          gh release delete latest-build --yes --cleanup-tag || true
-          gh release create latest-build \
+          plist="build/幕台.app/Contents/Info.plist"
+          version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$plist")
+          minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$plist")
+          # Each push to main is a new version; earlier versions stay listed.
+          # The old single "最新构建" release is no longer used.
+          gh release delete latest-build --yes --cleanup-tag 2>/dev/null || true
+          {
+            echo "## 本次更新"
+            echo
+            git log -1 --format=%B "$GITHUB_SHA" | grep -iv '^co-authored-by:' || true
+            echo
+            echo "适用于 Apple 芯片 Mac，需要 macOS ${minimum} 或更新版本。应用未经 Apple 公证，首次打开请在“系统设置 › 隐私与安全性”中选择“仍要打开”。"
+          } > release-notes.md
+          gh release create "v$version" \
             build/Mirrordeck-macOS-arm64.zip build/Mirrordeck-macOS-arm64.zip.sha256 \
-            --target "$GITHUB_SHA" --prerelease \
-            --title "最新构建 #${{ github.run_number }}" \
-            --notes "main 分支 ${GITHUB_SHA::7} 的自动构建。适用于 Apple 芯片 Mac，需要 macOS ${minimum} 或更新版本。应用未经 Apple 公证，首次打开请在“系统设置 › 隐私与安全性”中选择“仍要打开”。"
+            --target "$GITHUB_SHA" --latest \
+            --title "幕台 $version" \
+            --notes-file release-notes.md

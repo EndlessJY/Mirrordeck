@@ -39,7 +39,7 @@ macOS 原生的多设备投屏与管理应用。打开 `~/Applications/幕台.ap
 
 ## 下载
 
-每次推送到 `main` 分支，GitHub Actions 都会自动运行测试并构建，最新的安装包在 Releases 的“最新构建”（`latest-build`）中，每次构建的产物也保存在对应的 Actions 运行记录里。安装包适用于 Apple 芯片的 Mac，最低系统版本写在安装包的 `Info.plist` 和 Release 说明中（由构建机上 Homebrew 库的系统版本决定）。应用使用临时签名、未经 Apple 公证，首次打开需在“系统设置 › 隐私与安全性”中选择“仍要打开”。
+每次推送到 `main` 分支，GitHub Actions 都会自动运行测试、构建并发布一个新版本：版本号为“主版本.次版本.构建编号”（如 `v4.0.13`，主次版本取自 `native/Info.plist`），在 Releases 中逐个保留，最新的一个标为 Latest，说明里附本次提交的内容；应用“关于”中显示同一版本号。每次构建的产物也保存在对应的 Actions 运行记录里。安装包适用于 Apple 芯片的 Mac，最低系统版本写在安装包的 `Info.plist` 和 Release 说明中（由构建机上 Homebrew 库的系统版本决定）。应用使用临时签名、未经 Apple 公证，首次打开需在“系统设置 › 隐私与安全性”中选择“仍要打开”。
 
 ## 开发与构建
 
