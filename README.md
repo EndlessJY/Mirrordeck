@@ -48,7 +48,7 @@ macOS 原生的多设备投屏与管理应用。打开 `~/Applications/幕台.ap
 
 自动构建流程见 `.github/workflows/build.yml`：安装 Homebrew 依赖、运行单元测试、以运行编号作为构建号执行 `build_app.sh`，然后上传 zip 安装包。
 
-构建需要 Swift 编译器、Python 3、Meson、Ninja、dylibbundler，以及 SDL3、FFmpeg、libusb 和 libwebp（Homebrew `webp`，静态链接进应用）开发库。脚本在 `build/venv` 安装固定版本的 PyInstaller，把 Python 扫描程序独立打包；它还会编译 `vendor/scrcpy-source` 中修改过的 scrcpy 客户端并打包动态库。官方 scrcpy 发行包（提供 ADB 和设备端）在缺少时自动下载到 `vendor/downloads/`，打包前校验 SHA-256。构建脚本会检查应用包内所有程序和动态库要求的系统版本，把其中最高的主版本号写入 `LSMinimumSystemVersion`，避免在不支持的系统上打开后才失败。构建结果在 `build/幕台.app`；安装后不需要这些构建工具。应用内部标识仍为 `uk.agpt.lanadbmanager`，以保留已有设置和系统授权。
+构建需要 Swift 编译器、Python 3.11 或更新版本（优先使用 Homebrew 的 Python 3.13，与 CI 一致；没有时自动改用 Homebrew 的 `python3`，也可用 `PYTHON_BIN` 指定）、Meson、Ninja、dylibbundler，以及 SDL3、FFmpeg、libusb 和 libwebp（Homebrew `webp`，静态链接进应用）开发库。脚本在 `build/venv` 安装固定版本的 PyInstaller，把 Python 扫描程序独立打包；它还会编译 `vendor/scrcpy-source` 中修改过的 scrcpy 客户端并打包动态库。官方 scrcpy 发行包（提供 ADB 和设备端）在缺少时自动下载到 `vendor/downloads/`，打包前校验 SHA-256。构建脚本会检查应用包内所有程序和动态库要求的系统版本，把其中最高的主版本号写入 `LSMinimumSystemVersion`，避免在不支持的系统上打开后才失败。构建结果在 `build/幕台.app`；安装后不需要这些构建工具。应用内部标识仍为 `uk.agpt.lanadbmanager`，以保留已有设置和系统授权。
 
 对 scrcpy 源码的修改（均以 `LANADB` 注释标出）：
 

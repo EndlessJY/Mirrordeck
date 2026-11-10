@@ -114,6 +114,41 @@ class USBWirelessTests(AdbTestCase):
                 self.assertEqual(self.trusted(), {})
                 self.assertIn("身份", report["failed"][0]["reason"])
 
+    def test_trusted_connection_survives_a_failed_identity_read(self):
+        # Already verified and connected; this scan's serial read times out.
+        self.trusted_file.parent.mkdir(parents=True, exist_ok=True)
+        self.trusted_file.write_text(json.dumps({self.endpoint: self.serial}))
+        with self.device(connected=True, wireless_identity="") as (manager, state, calls):
+            report = self.scan(manager)
+        self.assertNotIn(("disconnect", self.endpoint), calls)
+        self.assertTrue(state["connected"])
+        self.assertEqual(self.trusted(), {self.endpoint: self.serial})
+        self.assertFalse(any("身份" in item["reason"] for item in report["failed"]))
+
+    def test_trusted_connection_to_another_device_is_still_rejected(self):
+        self.trusted_file.parent.mkdir(parents=True, exist_ok=True)
+        self.trusted_file.write_text(json.dumps({self.endpoint: self.serial}))
+        with self.device(connected=True, wireless_identity="other-phone") as (manager, state, calls):
+            self.scan(manager)
+        self.assertIn(("disconnect", self.endpoint), calls)
+        self.assertEqual(self.trusted(), {})
+
+    def test_verify_distinguishes_unreadable_from_mismatch(self):
+        manager = AdbLan()
+        for status, output, expected, disconnects in (
+            (0, "usb-oneplus\n", True, False),
+            (0, "other-phone\n", False, True),
+            (1, "error: closed", None, False),
+            (0, "unknown\n", None, False),
+        ):
+            calls = []
+            def command(*args, **_kwargs):
+                calls.append(args)
+                return (status, output) if "getprop" in args else (0, "")
+            with self.subTest(output=output), patch.object(manager, "command", side_effect=command):
+                self.assertIs(manager._verify_usb_identity(self.endpoint, self.serial), expected)
+                self.assertEqual(any(call[:1] == ("disconnect",) for call in calls), disconnects)
+
     def test_only_authorized_physical_usb_allows_cross_subnet(self):
         for overrides in ({"usb_state": "unauthorized"}, {"usb_tag": False}):
             with self.subTest(overrides=overrides), self.device(**overrides) as (manager, _state, calls):

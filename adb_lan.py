@@ -581,10 +581,15 @@ class AdbLan:
         temporary.write_text(json.dumps(verified, ensure_ascii=False, indent=2) + "\n")
         os.replace(temporary, USB_WIRELESS_FILE)
 
-    def _verify_usb_identity(self, endpoint: str, expected: str) -> bool:
-        # A failed read falls back to the endpoint in _identity; it must not
-        # count as a match or replace the USB-authorized identity in the cache.
-        if self._identity(endpoint) == expected:
+    def _verify_usb_identity(self, endpoint: str, expected: str) -> bool | None:
+        """True: the wireless device is the USB-authorized one. False: it is
+        another device (disconnected). None: its serial could not be read
+        this time (Wi-Fi hiccup, timeout); the connection is kept and checked
+        again on the next scan rather than dropped."""
+        actual = self._device_prop(endpoint, "ro.serialno")
+        if not actual or actual.lower() == "unknown":
+            return None
+        if actual == expected:
             return True
         self.command("disconnect", endpoint, timeout=3)
         return False
@@ -944,9 +949,14 @@ class AdbLan:
             for endpoint, expected in expected_usb.items():
                 if after.get(endpoint, {}).get("state") != "device":
                     continue
-                if self._verify_usb_identity(endpoint, expected):
+                match = self._verify_usb_identity(endpoint, expected)
+                if match:
                     verified[endpoint] = expected
-                else:
+                elif match is False or endpoint not in original_verified:
+                    # A new address must prove its identity; one already
+                    # trusted survives a read that fails this once.
+                    if match is None:
+                        self.command("disconnect", endpoint, timeout=3)
                     identity_rejections.add(endpoint)
                     after.pop(endpoint, None)
                     verified.pop(endpoint, None)
@@ -1137,7 +1147,7 @@ class AdbLan:
                 if not parsed or not (same_lan(parsed[0], self.networks) or endpoint in verified):
                     continue
                 if current.get(endpoint, {}).get("state") == "device":
-                    if endpoint in verified and not self._verify_usb_identity(endpoint, verified[endpoint]):
+                    if endpoint in verified and self._verify_usb_identity(endpoint, verified[endpoint]) is False:
                         self.last_reconnect.append(f"{endpoint}: 设备身份与 USB 授权记录不符")
                         known.pop(endpoint, None)
                         verified.pop(endpoint)
@@ -1149,7 +1159,9 @@ class AdbLan:
                 self.last_reconnect.append(f"{endpoint}: {output[:100]}")
                 if "connected to" in output.lower():
                     if endpoint in verified:
-                        if self._verify_usb_identity(endpoint, verified[endpoint]):
+                        match = self._verify_usb_identity(endpoint, verified[endpoint])
+                        if match is not False:
+                            # Unreadable this time: keep it, check next time.
                             changed = True
                         else:
                             self.last_reconnect.append(f"{endpoint}: 设备身份与 USB 授权记录不符")
@@ -1185,7 +1197,7 @@ class AdbLan:
                             if (
                                 retry_endpoint in verified
                                 and "connected to" in retry_output.lower()
-                                and not self._verify_usb_identity(retry_endpoint, verified[retry_endpoint])
+                                and self._verify_usb_identity(retry_endpoint, verified[retry_endpoint]) is False
                             ):
                                 self.last_reconnect.append(f"{retry_endpoint}: 设备身份与 USB 授权记录不符")
                                 known.pop(retry_endpoint, None)

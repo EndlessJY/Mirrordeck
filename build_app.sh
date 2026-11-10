@@ -3,8 +3,19 @@ set -euo pipefail
 cd "${0:A:h}"
 
 app="build/幕台.app"
-python="${PYTHON_BIN:-/opt/homebrew/opt/python@3.13/bin/python3.13}"
-[[ -x "$python" ]] || { echo "缺少 Python 3.13：brew install python@3.13，或设置 PYTHON_BIN" >&2; exit 1; }
+# Python for the bundled scanner: PYTHON_BIN if set, else Python 3.13 (what
+# CI uses), else this Mac's Homebrew python3.
+python="${PYTHON_BIN:-}"
+if [[ -z "$python" ]]; then
+  for candidate in /opt/homebrew/opt/python@3.13/bin/python3.13 /opt/homebrew/bin/python3; do
+    if [[ -x "$candidate" ]]; then python="$candidate"; break; fi
+  done
+fi
+[[ -n "$python" && -x "$python" ]] || {
+  echo "缺少 Python：brew install python@3.13，或设置 PYTHON_BIN" >&2; exit 1; }
+"$python" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || {
+  echo "Python 版本过低（需要 3.11 或更新）：$python" >&2; exit 1; }
+echo "使用 Python：$("$python" --version) ($python)"
 archive="vendor/downloads/scrcpy-macos-aarch64-v5.0.1.tar.gz"
 expected_sha="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
 if [[ ! -f "$archive" ]]; then
