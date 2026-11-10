@@ -1,5 +1,7 @@
 import ipaddress
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import adb_lan
@@ -7,6 +9,23 @@ from adb_lan import (
     AdbLan, endpoint_parts, explain_failure, parse_devices, parse_interfaces,
     parse_listeners, parse_mdns,
 )
+
+
+class AdbTestCase(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        for name, value in (
+            ("APP_DIR", root),
+            ("KNOWN_FILE", root / "known_endpoints.json"),
+            ("TCPIP_FILE", root / "tcpip_attempts.json"),
+            ("USB_WIRELESS_FILE", root / "usb_wireless_endpoints.json"),
+            ("find_adb", lambda: "/test/adb"),
+        ):
+            replacement = patch.object(adb_lan, name, value)
+            replacement.start()
+            self.addCleanup(replacement.stop)
 
 
 class ParserTests(unittest.TestCase):
@@ -47,7 +66,8 @@ emulator-5554 offline
         networks, notes = parse_interfaces(
             "en1: flags=1\n\tinet 10.0.0.3 netmask 0xffffff00 broadcast 10.0.0.255\n"
             "en2: flags=1\n\tinet 192.168.2.4 netmask 0xffff0000 broadcast 192.168.255.255\n"
-            "utun0: flags=1\n\tinet 100.64.0.2 netmask 0xffffffff\n"
+            "utun0: flags=1\n\tinet 100.64.0.2 netmask 0xffffffff\n",
+            for_scan=True,
         )
         self.assertEqual(networks, [
             ipaddress.IPv4Network("10.0.0.0/24"),
@@ -67,7 +87,7 @@ emulator-5554 offline
         self.assertIn("端口开放", explain_failure("failed", port_reachable=True))
 
 
-class RecoveryTests(unittest.TestCase):
+class RecoveryTests(AdbTestCase):
     def test_active_projection_prevents_server_restart(self):
         with patch.object(adb_lan, "run_command", return_value=(0,
             "/Library/Application Support/Mirrors/a.app/Contents/MacOS/scrcpy --serial=usb\n"
@@ -250,7 +270,7 @@ class DeviceInfoTests(unittest.TestCase):
         self.assertEqual(adb_lan.market_name({"ro.product.vendor.marketname": ""}), "")
 
 
-class ForgetTests(unittest.TestCase):
+class ForgetTests(AdbTestCase):
     def test_forget_removes_cached_endpoint(self):
         manager = AdbLan()
         saved = []
@@ -266,7 +286,7 @@ class ForgetTests(unittest.TestCase):
         self.assertEqual(saved[-1], {"10.0.0.5:5555": "664b491b"})
 
 
-class TcpipTests(unittest.TestCase):
+class TcpipTests(AdbTestCase):
     serial = "0123abcd"
     endpoint = "10.0.0.8:5555"
 
@@ -374,6 +394,171 @@ class TcpipTests(unittest.TestCase):
         with patch.object(adb_lan, "run_command", return_value=(0, ps)):
             self.assertTrue(adb_lan.mirror_uses_serial("0123abcd"))
             self.assertFalse(adb_lan.mirror_uses_serial("d537"))
+
+
+class NetworkScopeTests(AdbTestCase):
+    host_interfaces = (
+        "en0: flags=1\n\tinet 100.74.61.101 netmask 0xfffff000\n"
+        "utun0: flags=1\n\tinet 10.22.0.1 netmask 0xffffff00\n"
+    )
+
+    def test_interfaces_keep_real_lan_masks(self):
+        for host, mask, expected in (
+            ("100.74.61.101", "0xfffff000", "100.74.48.0/20"),
+            ("192.168.61.101", "0xffff0000", "192.168.0.0/16"),
+            ("10.0.0.3", "0xffffff00", "10.0.0.0/24"),
+        ):
+            with self.subTest(host=host):
+                networks, notes = parse_interfaces(f"en0: flags=1\n\tinet {host} netmask {mask}\n")
+                self.assertEqual(networks, [ipaddress.IPv4Network(expected)])
+                self.assertEqual(notes, [])
+
+    def test_interfaces_accept_shared_range_and_exclude_non_lan(self):
+        interfaces = "".join(
+            f"{name}: flags=1\n\tinet {address} netmask 0xffffff00\n"
+            for name, address in (
+                ("en0", "100.63.255.1"), ("en1", "100.64.0.1"),
+                ("en2", "100.127.255.1"), ("en3", "100.128.0.1"),
+                ("utun0", "100.74.61.1"), ("bridge0", "192.168.1.1"),
+                ("lo0", "127.0.0.1"), ("en4", "169.254.1.1"),
+                ("en5", "8.8.8.8"),
+            )
+        )
+        self.assertEqual(parse_interfaces(interfaces)[0], [
+            ipaddress.IPv4Network("100.64.0.0/24"),
+            ipaddress.IPv4Network("100.127.255.0/24"),
+        ])
+
+    def test_subnet_probe_stays_in_local_24_and_excludes_host(self):
+        manager = AdbLan()
+        manager.networks = [ipaddress.IPv4Network("100.74.48.0/20")]
+        probed = []
+
+        def probe(endpoint, *_args):
+            probed.append(endpoint)
+            return False
+
+        with (
+            patch.object(adb_lan, "run_command", return_value=(0, self.host_interfaces)),
+            patch.object(adb_lan, "port_open", side_effect=probe),
+        ):
+            self.assertEqual(manager._discover_lan_ports(), [])
+        expected = {
+            f"100.74.61.{last}:{port}"
+            for last in range(1, 255) if last != 101
+            for port in adb_lan.SCAN_PORTS
+        }
+        self.assertEqual(set(probed), expected)
+        self.assertEqual(len(probed), len(expected))
+        self.assertEqual(manager.networks, [ipaddress.IPv4Network("100.74.48.0/20")])
+
+    def scan_usb(self, host, phone, opened):
+        manager = AdbLan()
+        manager.save_known({})
+        manager.save_tcpip_attempts({})
+        manager.save_usb_wireless({})
+        serial = "usb-network-test"
+        endpoint = f"{phone}:5555"
+        connected = False
+        calls = []
+
+        def command(*args, **_kwargs):
+            nonlocal opened, connected
+            calls.append(args)
+            if args == ("devices", "-l"):
+                devices = f"{serial} device usb:1-1 model:TEST\n"
+                if connected:
+                    devices += f"{endpoint} device model:TEST\n"
+                return 0, devices
+            if args[:1] == ("connect",):
+                connected = True
+                return 0, f"connected to {endpoint}"
+            if args == ("-s", serial, "tcpip", "5555"):
+                opened = True
+                return 0, "restarting in TCP mode port: 5555"
+            if args[2:] == ("shell", "getprop", "ro.serialno"):
+                return 0, serial
+            if args[2:] == ("shell", "getprop"):
+                return 0, f"[ro.serialno]: [{serial}]\n[ro.product.model]: [TEST]\n"
+            if args[2:] == ("shell", "ip", "-o", "-4", "addr", "show"):
+                return 0, f"16: wlan0 inet {phone}/20 scope global wlan0\n"
+            return 0, ""
+
+        interfaces = self.host_interfaces.replace("100.74.61.101", host)
+        with (
+            patch.object(manager, "command", side_effect=command),
+            patch.object(adb_lan, "run_command", side_effect=lambda args, **_kw:
+                         (0, interfaces if args == ["/sbin/ifconfig"] else "")),
+            patch.object(adb_lan, "port_open", side_effect=lambda *_a, **_kw: opened),
+            patch.object(adb_lan.time, "sleep"),
+        ):
+            report = manager.scan(include_subnet_scan=False, usb_check=True)
+        return report, calls, manager
+
+    def check_usb_connection(self, opened):
+        for host, phone in (
+            ("100.74.61.101", "100.74.61.207"),
+            ("100.74.61.101", "100.74.60.207"),
+            ("192.168.61.101", "192.168.60.207"),
+        ):
+            with self.subTest(host=host, phone=phone, opened=opened):
+                report, calls, manager = self.scan_usb(host, phone, opened)
+                self.assertEqual(report["usb_issues"], [])
+                self.assertEqual(report["failed"], [])
+                self.assertEqual(report["networks"], [str(ipaddress.IPv4Network(f"{host}/20", strict=False))])
+                self.assertEqual(report["notes"], [])
+                self.assertTrue(report["devices"][0]["wireless"])
+                self.assertEqual(report["candidate_count"], 1)
+                self.assertEqual([c for c in calls if c[0] == "connect"], [("connect", f"{phone}:5555")])
+                tcpip = ("-s", "usb-network-test", "tcpip", "5555")
+                self.assertEqual(calls.count(tcpip), 0 if opened else 1)
+                if not opened:
+                    self.assertLess(calls.index(tcpip), calls.index(("connect", f"{phone}:5555")))
+                self.assertEqual(manager.load_known()[f"{phone}:5555"], "usb-network-test")
+
+    def test_usb_connects_existing_wireless_port(self):
+        self.check_usb_connection(opened=True)
+
+    def test_usb_enables_closed_wireless_port_before_connecting(self):
+        self.check_usb_connection(opened=False)
+
+    def test_usb_does_not_configure_public_or_link_local_addresses(self):
+        for phone in ("8.8.8.8", "169.254.1.2"):
+            with self.subTest(phone=phone):
+                report, calls, _manager = self.scan_usb("100.74.61.101", phone, opened=False)
+                self.assertEqual(report["usb_issues"][0]["state"], "no_lan_ip")
+                self.assertFalse(any("tcpip" in call or call[0] == "connect" for call in calls))
+
+    def test_manual_connect_and_pair_use_real_lan_membership(self):
+        endpoint = "100.74.60.207:5555"
+        manager = AdbLan()
+        with (
+            patch.object(adb_lan, "run_command", return_value=(0, self.host_interfaces)),
+            patch.object(adb_lan, "port_open", return_value=True),
+            patch.object(manager, "command", return_value=(0, "connected to " + endpoint)) as command,
+            patch.object(manager, "devices", return_value={endpoint: {"state": "device"}}),
+        ):
+            self.assertTrue(manager.connect_manual(endpoint)["ok"])
+            command.assert_any_call("connect", endpoint, timeout=3)
+            command.return_value = (0, "Successfully paired 123456")
+            self.assertTrue(manager.pair(endpoint, "123456")["ok"])
+            command.assert_called_with("pair", endpoint, "123456", timeout=10)
+
+    def test_manual_connect_and_pair_reject_non_lan_addresses(self):
+        manager = AdbLan()
+        with (
+            patch.object(adb_lan, "run_command", return_value=(0, self.host_interfaces)),
+            patch.object(adb_lan, "port_open") as port,
+            patch.object(manager, "command") as command,
+        ):
+            for endpoint in ("100.74.64.207:5555", "10.22.0.2:5555", "8.8.8.8:5555"):
+                with self.subTest(endpoint=endpoint):
+                    with self.assertRaisesRegex(ValueError, "局域网"):
+                        manager.connect_manual(endpoint)
+                    with self.assertRaisesRegex(ValueError, "局域网"):
+                        manager.pair(endpoint, "123456")
+            port.assert_not_called()
+            command.assert_not_called()
 
 
 if __name__ == "__main__":

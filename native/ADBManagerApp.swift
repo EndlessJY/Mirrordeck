@@ -90,7 +90,7 @@ struct ADBReport: Codable {
         let usbItems = usbIssues.map {
             IssueItem(id: "usb:" + $0.serial, title: $0.serial,
                       summary: $0.state == "unauthorized" ? "请在设备上允许 USB 调试" :
-                               $0.state == "no_lan_ip" ? "设备没有同网段的 Wi-Fi 地址" :
+                               $0.state == "no_lan_ip" ? "未找到可用于自动无线 ADB 的 Wi-Fi 地址" :
                                $0.state == "tcpip_unreachable" ?
                                    "已尝试开启无线 ADB，但 5555 端口不可达；检查路由器 AP 隔离或防火墙" :
                                $0.state == "offline" ? "设备离线，请解锁或启动模拟器" : $0.state,

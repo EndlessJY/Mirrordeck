@@ -3,6 +3,8 @@ set -euo pipefail
 cd "${0:A:h}"
 
 app="build/幕台.app"
+python="${PYTHON_BIN:-/opt/homebrew/opt/python@3.13/bin/python3.13}"
+[[ -x "$python" ]] || { echo "缺少 Python 3.13：brew install python@3.13，或设置 PYTHON_BIN" >&2; exit 1; }
 archive="vendor/downloads/scrcpy-macos-aarch64-v5.0.1.tar.gz"
 expected_sha="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
 if [[ ! -f "$archive" ]]; then
@@ -22,7 +24,7 @@ fi
 /opt/homebrew/bin/ninja -C build/custom-scrcpy
 
 if [[ ! -x build/venv/bin/pyinstaller ]]; then
-  /opt/homebrew/bin/python3 -m venv build/venv
+  "$python" -m venv build/venv
   build/venv/bin/python -m pip install --disable-pip-version-check 'pyinstaller==6.22.3'
 fi
 build/venv/bin/pyinstaller --noconfirm --onedir --console --target-arch arm64 \

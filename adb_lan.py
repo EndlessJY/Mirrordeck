@@ -19,6 +19,7 @@ from typing import Callable
 APP_DIR = Path.home() / "Library" / "Application Support" / "LAN ADB Manager"
 KNOWN_FILE = APP_DIR / "known_endpoints.json"
 TCPIP_FILE = APP_DIR / "tcpip_attempts.json"
+USB_WIRELESS_FILE = APP_DIR / "usb_wireless_endpoints.json"
 # `adb tcpip` restarts adbd and drops the USB link. A device connection or an
 # app launch always checks again; periodic scans retry a failed attempt only
 # after the back-off. The guard stops the reconnect that `adb tcpip` itself
@@ -28,6 +29,10 @@ TCPIP_LOOP_GUARD_SECONDS = 2 * 60
 ADB_PORT = 5037
 SCAN_PORTS = (5555, 5557, 16416)
 IGNORED_INTERFACES = ("lo", "utun", "awdl", "llw", "bridge", "vmenet")
+SHARED_ADDRESS_SPACE = ipaddress.IPv4Network("100.64.0.0/10")
+USB_WIFI_NETWORKS = tuple(ipaddress.IPv4Network(network) for network in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+))
 ADB_ENV_EXCLUDE = (
     "ADB_SERVER_SOCKET",
     "ANDROID_ADB_SERVER_ADDRESS",
@@ -94,6 +99,7 @@ def parse_devices(output: str) -> dict[str, dict]:
         found[parts[0]] = {
             "serial": parts[0],
             "state": parts[1],
+            "usb": any(item.startswith("usb:") for item in parts[2:]),
             "model_hint": next(
                 (item[6:] for item in parts[2:] if item.startswith("model:")), ""
             ),
@@ -116,7 +122,9 @@ def parse_mdns(output: str) -> list[dict]:
     return services
 
 
-def parse_interfaces(output: str) -> tuple[list[ipaddress.IPv4Network], list[str]]:
+def parse_interfaces(output: str, *, for_scan: bool = False
+                     ) -> tuple[list[ipaddress.IPv4Network], list[str]]:
+    """Keep real LAN membership; bound only the addresses actively probed."""
     networks: list[ipaddress.IPv4Network] = []
     notes: list[str] = []
     interface = ""
@@ -130,11 +138,11 @@ def parse_interfaces(output: str) -> tuple[list[ipaddress.IPv4Network], list[str
         if not match:
             continue
         ip = ipaddress.IPv4Address(match.group(1))
-        if not ip.is_private or ip.is_loopback or ip.is_link_local:
+        if not (ip.is_private or ip in SHARED_ADDRESS_SPACE) or ip.is_loopback or ip.is_link_local:
             continue
         mask = str(ipaddress.IPv4Address(int(match.group(2), 16)))
         network = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
-        if network.num_addresses > 256:
+        if for_scan and network.num_addresses > 256:
             network = ipaddress.IPv4Network(f"{ip}/24", strict=False)
             notes.append(f"{interface} 网段较大，本次仅扫描本机所在的 {network}")
         if network not in networks:
@@ -186,6 +194,13 @@ def port_open(endpoint: str, timeout: float = 0.45) -> bool:
             return True
     except OSError:
         return False
+
+
+def usb_wireless_endpoint(endpoint: str) -> bool:
+    parsed = endpoint_parts(endpoint)
+    return bool(parsed and parsed[1] == 5555 and any(
+        ipaddress.IPv4Address(parsed[0]) in network for network in USB_WIFI_NETWORKS
+    ))
 
 
 def port_open_stable(endpoint: str, attempts: int = 3) -> bool:
@@ -548,6 +563,32 @@ class AdbLan:
         temporary.write_text(json.dumps(known, ensure_ascii=False, indent=2) + "\n")
         os.replace(temporary, KNOWN_FILE)
 
+    def load_usb_wireless(self) -> dict[str, str]:
+        """Only endpoints previously matched to an authorized physical USB device."""
+        try:
+            data = json.loads(USB_WIRELESS_FILE.read_text())
+            return {
+                endpoint: identity for endpoint, identity in data.items()
+                if usb_wireless_endpoint(endpoint) and isinstance(identity, str)
+                and identity.strip() and identity != endpoint and identity.lower() != "unknown"
+            }
+        except (OSError, ValueError, AttributeError, TypeError):
+            return {}
+
+    def save_usb_wireless(self, verified: dict[str, str]) -> None:
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = USB_WIRELESS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(verified, ensure_ascii=False, indent=2) + "\n")
+        os.replace(temporary, USB_WIRELESS_FILE)
+
+    def _verify_usb_identity(self, endpoint: str, expected: str) -> bool:
+        # A failed read falls back to the endpoint in _identity; it must not
+        # count as a match or replace the USB-authorized identity in the cache.
+        if self._identity(endpoint) == expected:
+            return True
+        self.command("disconnect", endpoint, timeout=3)
+        return False
+
     def load_tcpip_attempts(self) -> dict[str, dict]:
         try:
             data = json.loads(TCPIP_FILE.read_text())
@@ -589,11 +630,15 @@ class AdbLan:
         status, output = self.command("-s", serial, "shell", "ip", "-o", "-4", "addr", "show", timeout=4)
         if status != 0:
             return []
-        return [
-            ip
-            for ip in re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)/\d+", output)
-            if same_lan(ip, self.networks) and ip != "127.0.0.1"
-        ]
+        ips = []
+        for interface, ip in re.findall(
+            r"^\d+:\s+(\S+)\s+.*?\binet (\d+\.\d+\.\d+\.\d+)/\d+", output, re.M
+        ):
+            interface = interface.split("@", 1)[0].split(":", 1)[0]
+            routed_wifi = bool(re.fullmatch(r"(?:wlan|wifi)\d+", interface)) and usb_wireless_endpoint(f"{ip}:5555")
+            if ip != "127.0.0.1" and (same_lan(ip, self.networks) or routed_wifi) and ip not in ips:
+                ips.append(ip)
+        return ips
 
     def _identity(self, serial: str, props: dict[str, str] | None = None) -> str:
         if serial.startswith("emulator-"):
@@ -628,12 +673,13 @@ class AdbLan:
         return result
 
     def _discover_lan_ports(self) -> list[str]:
+        _code, output = run_command(["/sbin/ifconfig"], timeout=5)
+        scan_networks, _notes = parse_interfaces(output, for_scan=True)
         hosts = [
             str(ip)
-            for network in self.networks
+            for network in scan_networks
             for ip in network.hosts()
         ]
-        _code, output = run_command(["/sbin/ifconfig"], timeout=5)
         local_ips = set(re.findall(r"\binet (\d+\.\d+\.\d+\.\d+)", output))
         targets = (
             f"{host}:{port}"
@@ -732,17 +778,24 @@ class AdbLan:
             self._start_server()
             _code, ifconfig = run_command(["/sbin/ifconfig"], timeout=5)
             self.networks, notes = parse_interfaces(ifconfig)
+            if include_subnet_scan:
+                _scan_networks, notes = parse_interfaces(ifconfig, for_scan=True)
             before = self.devices()
             known = self.load_known()
+            verified = self.load_usb_wireless()
+            original_verified = verified.copy()
+            expected_usb = verified.copy()
             candidates: dict[str, set[str]] = {}
             pairing = []
 
             def add(endpoint: str, source: str) -> None:
                 parsed = endpoint_parts(endpoint)
-                if parsed and same_lan(parsed[0], self.networks):
+                if parsed and (same_lan(parsed[0], self.networks) or (
+                    endpoint in expected_usb and usb_wireless_endpoint(endpoint)
+                )):
                     candidates.setdefault(endpoint, set()).add(source)
 
-            for endpoint in known:
+            for endpoint in dict.fromkeys([*known, *verified]):
                 add(endpoint, "上次成功")
             for endpoint, data in before.items():
                 if endpoint_parts(endpoint):
@@ -786,13 +839,24 @@ class AdbLan:
                     usb_issues.append({"serial": serial, "state": item["state"]})
                     continue
                 identity = self._identity(serial)
-                if identity in wireless_identities:
-                    continue
                 ips = self._wifi_ips_settled(serial, wait=usb_check)
+                # Only a real, authorized USB transport may introduce a routed
+                # Wi-Fi address. An unresolved mDNS name is not USB proof.
+                ips = [ip for ip in ips if same_lan(ip, self.networks) or item.get("usb", False)]
                 if not ips:
-                    usb_issues.append({"serial": serial, "state": "no_lan_ip"})
+                    if identity not in wireless_identities:
+                        usb_issues.append({"serial": serial, "state": "no_lan_ip"})
+                    continue
+                if identity in wireless_identities:
+                    for ip in ips:
+                        endpoint = f"{ip}:5555"
+                        if item.get("usb") and before.get(endpoint, {}).get("state") == "device":
+                            expected_usb[endpoint] = identity
+                            add(endpoint, "USB 已授权")
                     continue
                 endpoint = f"{ips[0]}:5555"
+                if item.get("usb"):
+                    expected_usb[endpoint] = identity
                 port_ready = port_open_stable(endpoint)
                 if port_ready and known.get(endpoint) == identity:
                     add(endpoint, "USB 已授权")
@@ -876,6 +940,21 @@ class AdbLan:
                     outcomes[endpoint] = self._connect(endpoint, attempts=1)
             after = self.devices()
 
+            identity_rejections = set()
+            for endpoint, expected in expected_usb.items():
+                if after.get(endpoint, {}).get("state") != "device":
+                    continue
+                if self._verify_usb_identity(endpoint, expected):
+                    verified[endpoint] = expected
+                else:
+                    identity_rejections.add(endpoint)
+                    after.pop(endpoint, None)
+                    verified.pop(endpoint, None)
+                    known.pop(endpoint, None)
+                    outcomes[endpoint] = "无线设备身份与 USB 授权记录不一致，未接受该连接"
+            if verified != original_verified:
+                self.save_usb_wireless(verified)
+
             self.progress("汇总物理设备与连接状态")
             devices: dict[str, dict] = {}
             for serial, item in after.items():
@@ -941,7 +1020,7 @@ class AdbLan:
                 if set(sources) <= {"上次成功"} and not state and not reachable:
                     continue
                 outcome = outcomes.get(endpoint, "")
-                reason = (
+                reason = outcome if endpoint in identity_rejections else (
                     ("模拟器实例未运行或 ADB 端口已关闭"
                      if "端口未开放" in outcome
                      else "模拟器端口可见，但 Android 实例未就绪或 ADB 握手失败")
@@ -1011,6 +1090,10 @@ class AdbLan:
             known = self.load_known()
             known.pop(endpoint, None)
             self.save_known(known)
+            verified = self.load_usb_wireless()
+            if endpoint in verified:
+                verified.pop(endpoint)
+                self.save_usb_wireless(verified)
             if self.devices().get(endpoint, {}).get("state") != "device":
                 self.command("disconnect", endpoint, timeout=3)
             return {"ok": True, "message": "已忽略 " + endpoint}
@@ -1039,6 +1122,9 @@ class AdbLan:
             current = self.devices()
             original_known = self.load_known()
             known = original_known.copy()
+            verified = self.load_usb_wireless()
+            original_verified = verified.copy()
+            known.update(verified)
             mdns = parse_mdns(self.command("mdns", "services", timeout=4)[1])
             for entry in mdns:
                 endpoint = entry["endpoint"]
@@ -1046,11 +1132,15 @@ class AdbLan:
                     known.setdefault(endpoint, "")
             for endpoint in self._discover_emulators():
                 known.setdefault(endpoint, "")
-            for endpoint, identity in known.items():
+            for endpoint, identity in list(known.items()):
                 parsed = endpoint_parts(endpoint)
-                if not parsed or not same_lan(parsed[0], self.networks):
+                if not parsed or not (same_lan(parsed[0], self.networks) or endpoint in verified):
                     continue
                 if current.get(endpoint, {}).get("state") == "device":
+                    if endpoint in verified and not self._verify_usb_identity(endpoint, verified[endpoint]):
+                        self.last_reconnect.append(f"{endpoint}: 设备身份与 USB 授权记录不符")
+                        known.pop(endpoint, None)
+                        verified.pop(endpoint)
                     continue
                 if not port_open_stable(endpoint, attempts=2):
                     self.last_reconnect.append(f"{endpoint}: 端口暂不可达")
@@ -1058,6 +1148,14 @@ class AdbLan:
                 output = self._connect(endpoint, attempts=1)
                 self.last_reconnect.append(f"{endpoint}: {output[:100]}")
                 if "connected to" in output.lower():
+                    if endpoint in verified:
+                        if self._verify_usb_identity(endpoint, verified[endpoint]):
+                            changed = True
+                        else:
+                            self.last_reconnect.append(f"{endpoint}: 设备身份与 USB 授权记录不符")
+                            known.pop(endpoint, None)
+                            verified.pop(endpoint)
+                        continue
                     actual = self._identity(endpoint)
                     if identity and actual not in {identity, endpoint}:
                         self.last_reconnect.append(f"{endpoint}: 设备 ID 与缓存不符")
@@ -1076,14 +1174,22 @@ class AdbLan:
                     and time.monotonic() - self._last_server_restart > 60
                     and self.restart_server()
                 ):
-                    for retry_endpoint in known:
+                    for retry_endpoint in list(known):
                         retry_parts = endpoint_parts(retry_endpoint)
                         if (
                             retry_parts
-                            and same_lan(retry_parts[0], self.networks)
+                            and (same_lan(retry_parts[0], self.networks) or retry_endpoint in verified)
                             and port_open_stable(retry_endpoint, attempts=2)
                         ):
-                            self._connect(retry_endpoint, attempts=1)
+                            retry_output = self._connect(retry_endpoint, attempts=1)
+                            if (
+                                retry_endpoint in verified
+                                and "connected to" in retry_output.lower()
+                                and not self._verify_usb_identity(retry_endpoint, verified[retry_endpoint])
+                            ):
+                                self.last_reconnect.append(f"{retry_endpoint}: 设备身份与 USB 授权记录不符")
+                                known.pop(retry_endpoint, None)
+                                verified.pop(retry_endpoint)
                     changed = True
                     break
             kept = {
@@ -1092,6 +1198,8 @@ class AdbLan:
             }
             if kept != original_known:
                 self.save_known(kept)
+            if verified != original_verified:
+                self.save_usb_wireless(verified)
         finally:
             self._operation_lock.release()
         return changed
