@@ -50,7 +50,7 @@ enum {
 @property(nonatomic) BOOL busy;
 // A short confirmation ("已复制到剪贴板") instead of the recording clock.
 @property(nonatomic) BOOL notice;
-- (void)showNotice:(NSString *)text;
+- (void)showNotice:(NSString *)text symbol:(NSString *)name color:(NSColor *)color;
 @property(nonatomic, copy) void (^onClick)(void);
 - (void)showText:(NSString *)text busy:(BOOL)busy;
 - (CGFloat)preferredWidth;
@@ -105,19 +105,18 @@ enum {
                                round((self.bounds.size.height - frame.size.height) / 2));
     self.label.frame = frame;
 }
-- (void)showNotice:(NSString *)text {
+- (void)showNotice:(NSString *)text symbol:(NSString *)name color:(NSColor *)color {
     self.notice = YES;
     self.busy = YES;
     [self.spinner stopAnimation:nil];
     [self.dot.layer removeAllAnimations];
     self.dot.hidden = YES;
     self.toolTip = nil;
-    NSImage *symbol = [NSImage imageWithSystemSymbolName:@"checkmark.circle.fill"
-                                accessibilityDescription:nil];
+    NSImage *symbol = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
     symbol = [symbol imageWithSymbolConfiguration:[[NSImageSymbolConfiguration
         configurationWithPointSize:12.5 weight:NSFontWeightSemibold]
         configurationByApplyingConfiguration:[NSImageSymbolConfiguration
-            configurationWithHierarchicalColor:NSColor.systemGreenColor]]];
+            configurationWithHierarchicalColor:color]]];
     NSTextAttachment *mark = [[NSTextAttachment alloc] init];
     mark.image = symbol;
     mark.bounds = NSMakeRect(0, -2.5, symbol.size.width, symbol.size.height);
@@ -413,6 +412,9 @@ enum {
 // LANADB: a single app on its own virtual display. Device-wide controls
 // (capture, volume, power) stay in the device's main mirror window.
 @property(nonatomic) BOOL appWindow;
+// The app shows its first page: Back asks for confirmation before closing.
+@property(nonatomic) BOOL appAtRoot;
+@property(nonatomic, strong) NSDate *rootBackAt;
 @property(nonatomic, strong) LANADBLaunchView *launchView;
 @property(nonatomic, strong) NSTimer *launchTimer;
 @property(nonatomic) NSInteger launchChecks;
@@ -806,13 +808,22 @@ enum {
 
 /// "已复制到剪贴板" where the recording clock was, then fades away.
 - (void)showCopiedNotice {
+    [self showNotice:@"已复制到剪贴板" symbol:@"checkmark.circle.fill"
+               color:NSColor.systemGreenColor duration:1.6];
+}
+
+/// A short message in the recording clock's place (not while recording).
+- (void)showNotice:(NSString *)text symbol:(NSString *)symbol color:(NSColor *)color
+          duration:(NSTimeInterval)duration {
     if (self.recording || self.countdown > 0) { return; }
-    [self.statusPill showNotice:@"已复制到剪贴板"];
+    [self.statusPill showNotice:text symbol:symbol color:color];
     [self placeStatusPill];
     LANADBStatusPill *pill = self.statusPill;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+    NSString *shown = pill.label.stringValue;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (!pill.notice) { return; }
+        // A newer notice replaced this one.
+        if (!pill.notice || ![pill.label.stringValue isEqualToString:shown]) { return; }
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
             context.duration = 0.3;
             pill.animator.alphaValue = 0;
@@ -933,6 +944,11 @@ enum {
         NSString *kind = info[@"kind"];
         NSString *message = info[@"message"] ?: @"";
         BOOL success = [info[@"success"] boolValue];
+        if ([kind isEqualToString:@"appRoot"]) {
+            self.appAtRoot = [info[@"root"] boolValue];
+            if (!self.appAtRoot) { self.rootBackAt = nil; }
+            return;
+        }
         if ([kind isEqualToString:@"reveal"]) {
             if (self.pinned) {
                 self.temporarilyLoweredForFinder = YES;
@@ -1349,6 +1365,21 @@ enum {
         return;
     }
     if (self.appWindow && index == SC_BUTTON_BACK) {
+        if (self.appAtRoot) {
+            // On the app's first page Back would leave the app: ask once more.
+            if (self.rootBackAt && -[self.rootBackAt timeIntervalSinceNow] < 2.0) {
+                self.rootBackAt = nil;
+                sc_lanadb_press_key(4);
+                NSWindow *window = self.targetWindow;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{ [window performClose:nil]; });
+            } else {
+                self.rootBackAt = [NSDate date];
+                [self showNotice:@"再按一次返回关闭窗口" symbol:@"arrow.uturn.backward.circle.fill"
+                           color:NSColor.whiteColor duration:2.0];
+            }
+            return;
+        }
         sc_lanadb_press_key(4); // AKEYCODE_BACK, on this window's display
         return;
     }

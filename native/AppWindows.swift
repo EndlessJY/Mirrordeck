@@ -327,7 +327,7 @@ final class AppWindowStore: ObservableObject {
                                                          token: token, options: options,
                                                          title: title)
                     self.watchForExit(key: key, process: process, serial: transport.endpoint,
-                                      existing: before, package: app.package)
+                                      existing: before, package: app.package, token: token)
                 } catch {
                     logHandle.closeFile()
                     try? FileManager.default.removeItem(at: logURL)
@@ -352,11 +352,12 @@ final class AppWindowStore: ObservableObject {
     /// first page (twice, for apps that ask "press again to exit") finishes it
     /// and only the display's launcher, or nothing, remains.
     private func watchForExit(key: String, process: Process, serial: String,
-                              existing: Set<Int>, package: String) {
+                              existing: Set<Int>, package: String, token: String) {
         guard watchers[key] == nil, let adb = tools?.appendingPathComponent("adb") else { return }
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         var display: Int?
         var seen = false
+        var lastRoot: Bool?
         timer.schedule(deadline: .now() + 0.8, repeating: 0.8)
         timer.setEventHandler { [weak self] in
             guard process.isRunning else { timer.cancel(); return }
@@ -371,6 +372,17 @@ final class AppWindowStore: ObservableObject {
             guard let display, let top = Self.topActivity(in: output, display: display) else { return }
             if top.contains(package + "/") {
                 seen = true
+                // On its first page the window asks for a second Back before
+                // closing (the hint shows where the recording clock does).
+                let root = Self.activityCount(in: output, display: display, package: package) <= 1
+                if root != lastRoot {
+                    lastRoot = root
+                    DistributedNotificationCenter.default().postNotificationName(
+                        Notification.Name("uk.agpt.lanadbmanager.mirror.state"), object: nil,
+                        userInfo: ["token": token, "kind": "appRoot", "root": root,
+                                   "success": true, "message": ""],
+                        deliverImmediately: true)
+                }
             } else if seen && (top.isEmpty || top.contains("Launcher")) {
                 timer.cancel()
                 DispatchQueue.main.async {
@@ -400,6 +412,25 @@ final class AppWindowStore: ObservableObject {
             }
         }
         return inDisplay ? "" : nil
+    }
+
+    /// How many of the app's pages are open on the display (1: its first page).
+    static func activityCount(in output: String, display: Int, package: String) -> Int {
+        var inDisplay = false
+        var count = 0
+        for line in output.split(separator: "\n") {
+            let text = line.trimmingCharacters(in: .whitespaces)
+            if text.hasPrefix("Display #") {
+                if inDisplay { break }
+                inDisplay = text.hasPrefix("Display #\(display) ") || text == "Display #\(display)"
+                continue
+            }
+            if inDisplay && text.contains("Hist  #") && !text.contains(" f}")
+                && text.contains(package + "/") {
+                count += 1
+            }
+        }
+        return count
     }
 
     private static func failureMessage(_ output: String, app: DeviceApp) -> String {
