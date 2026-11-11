@@ -807,8 +807,10 @@ enum {
 }
 
 /// "已复制到剪贴板" where the recording clock was, then fades away.
-- (void)showCopiedNotice {
-    [self showNotice:@"已复制到剪贴板" symbol:@"checkmark.circle.fill"
+// LANADB: after a capture is saved: "已复制到剪贴板" when it went to the
+// clipboard, otherwise "已保存".
+- (void)showSavedNotice:(BOOL)copied {
+    [self showNotice:copied ? @"已复制到剪贴板" : @"已保存" symbol:@"checkmark.circle.fill"
                color:NSColor.systemGreenColor duration:1.6];
 }
 
@@ -965,7 +967,7 @@ enum {
             [self updateButtons];
             if (success) {
                 [self showScreenshotThumbnail:info[@"path"]];
-                if ([info[@"copied"] boolValue]) { [self showCopiedNotice]; }
+                [self showSavedNotice:[info[@"copied"] boolValue]];
             } else {
                 [self showFeedback:message nearButton:SC_BUTTON_SCREENSHOT];
             }
@@ -1003,9 +1005,10 @@ enum {
                 if (success && [info[@"path"] length]) {
                     [self showCaptureThumbnail:info[@"thumb"] ?: info[@"path"] file:info[@"path"]];
                 }
-                if (success && [info[@"copied"] boolValue]) {
+                if (success) {
+                    BOOL copied = [info[@"copied"] boolValue];
                     // After `recording` is cleared below.
-                    dispatch_async(dispatch_get_main_queue(), ^{ [self showCopiedNotice]; });
+                    dispatch_async(dispatch_get_main_queue(), ^{ [self showSavedNotice:copied]; });
                 }
             }
             self.recording = active;

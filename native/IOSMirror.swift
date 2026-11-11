@@ -337,8 +337,8 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         }
         model.screenshotSaving = true
         withAnimation(.easeOut(duration: 0.06)) { model.flash = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            withAnimation(.easeOut(duration: 0.35)) { self?.model.flash = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak self] in
+            withAnimation(.easeOut(duration: 0.32)) { self?.model.flash = false }
         }
         let device = device
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -466,21 +466,117 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     }
 
     /// Saved: copy and reveal as the settings say, and confirm in the pill.
+    /// Saved: the thumbnail shrinks into the corner, and the file is copied
+    /// and revealed as the settings say, as in the Android window.
     private func delivered(_ url: URL) {
         let copy = UserDefaults.standard.object(forKey: MirrorStore.copyToClipboardKey) as? Bool ?? true
         let reveal = UserDefaults.standard.object(forKey: MirrorStore.revealInFinderKey) as? Bool ?? false
-        if copy && MirrorStore.copyToClipboard(url) {
-            showNotice("已复制到剪贴板", error: false)
-        } else {
-            showNotice("已保存", error: false)
+        let copied = copy && MirrorStore.copyToClipboard(url)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let still = Self.still(of: url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let still { self.showThumbnail(still, file: url) }
+                self.showNotice(copied ? "已复制到剪贴板" : "已保存", error: false)
+                if reveal { Self.reveal(url) }
+            }
         }
-        if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    }
+
+    /// The image for the thumbnail: the picture itself, the first frame of a
+    /// GIF / WebP, or a frame of a recording.
+    private static func still(of url: URL) -> NSImage? {
+        if url.pathExtension.lowercased() != "mp4" { return NSImage(contentsOf: url) }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 900, height: 900)
+        guard let frame = try? generator.copyCGImage(at: CMTime(seconds: 0.2, preferredTimescale: 600),
+                                                     actualTime: nil) else { return nil }
+        return NSImage(cgImage: frame, size: NSSize(width: frame.width, height: frame.height))
+    }
+
+    /// `open -R` brings Finder forward even when this app cannot activate it.
+    private static func reveal(_ url: URL) {
+        let opener = Process()
+        opener.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        opener.arguments = ["-R", url.path]
+        opener.standardOutput = FileHandle.nullDevice
+        opener.standardError = FileHandle.nullDevice
+        if (try? opener.run()) == nil { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    }
+
+    /// The Android window's thumbnail: from the full picture into the lower
+    /// right corner (30% of the width, 14-point margin, white border), rests
+    /// 1.2 s, then slides out to the right. Clicking it shows the file.
+    private func showThumbnail(_ image: NSImage, file: URL) {
+        guard !closing, let content = window?.contentView,
+              image.size.width > 0, image.size.height > 0 else { return }
+        let bounds = content.bounds
+        let aspect = image.size.width / image.size.height
+        var full = bounds
+        if bounds.width / bounds.height > aspect {
+            full.size.width = bounds.height * aspect
+            full.origin.x = bounds.midX - full.width / 2
+        } else {
+            full.size.height = bounds.width / aspect
+            full.origin.y = bounds.midY - full.height / 2
+        }
+        let margin: CGFloat = 14
+        let width = max(72, (bounds.width * 0.3).rounded())
+        let height = (width / aspect).rounded()
+        let corner = NSRect(x: bounds.maxX - width - margin, y: bounds.minY + margin,
+                            width: width, height: height)
+
+        let card = IOSThumbnailView(frame: full)
+        card.toolTip = "在访达中显示"
+        card.onClick = { [weak card] in
+            Self.reveal(file)
+            card?.removeFromSuperview()
+        }
+        card.wantsLayer = true
+        card.layer?.shadowColor = NSColor.black.cgColor
+        card.layer?.shadowOpacity = 0.35
+        card.layer?.shadowRadius = 10
+        card.layer?.shadowOffset = CGSize(width: 0, height: -3)
+        let picture = NSImageView(image: image)
+        picture.frame = card.bounds
+        picture.autoresizingMask = [.width, .height]
+        picture.imageScaling = .scaleAxesIndependently
+        picture.wantsLayer = true
+        picture.layer?.cornerRadius = 4
+        picture.layer?.masksToBounds = true
+        picture.layer?.borderColor = NSColor.white.cgColor
+        picture.layer?.borderWidth = 0
+        card.addSubview(picture)
+        content.addSubview(card, positioned: .above, relativeTo: nil)
+
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.42
+            context.allowsImplicitAnimation = true
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1)
+            card.animator().frame = corner
+            picture.layer?.cornerRadius = 10
+            picture.layer?.borderWidth = 2.5
+        }, completionHandler: {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                guard card.superview != nil else { return }
+                var away = corner
+                away.origin.x = content.bounds.maxX + 8
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.3
+                    context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                    card.animator().frame = away
+                    card.animator().alphaValue = 0
+                }, completionHandler: { card.removeFromSuperview() })
+            }
+        })
     }
 
     private func showNotice(_ text: String, error: Bool) {
         model.noticeIsError = error
         withAnimation(.easeOut(duration: 0.2)) { model.notice = text }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+        // As in the Android window: 1.6 s for a result, 2.6 s for a failure.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (error ? 2.6 : 1.6)) { [weak self] in
             guard self?.model.notice == text else { return }
             withAnimation(.easeIn(duration: 0.3)) { self?.model.notice = nil }
         }
@@ -488,6 +584,18 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
 }
 
 // MARK: - Title bar and overlay
+
+/// The capture thumbnail; a click anywhere on it shows the file in Finder.
+private final class IOSThumbnailView: NSView {
+    var onClick: (() -> Void)?
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // The image view inside would otherwise take the click.
+        super.hitTest(point) != nil ? self : nil
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
 
 private struct IOSMirrorToolbar: View {
     @ObservedObject var model: IOSMirrorModel
