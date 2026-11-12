@@ -16,19 +16,12 @@ concurrency:
 jobs:
   build:
     name: macOS (Apple 芯片)
-    # macOS 14: Homebrew's libraries there are built for macOS 14, so the app
-    # (which targets 14) still opens on Sonoma. On a newer runner they would
-    # raise the minimum system to that runner's version.
-    runs-on: macos-14
+    # GitHub no longer offers macOS 14 runners. Homebrew's libraries here are
+    # built for macOS 15, which sets the app's minimum system (see build_app.sh).
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
-      - name: 选择 Xcode 16
-        run: |
-          xcode=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
-          if [[ -n "$xcode" ]]; then sudo xcode-select -s "$xcode"; fi
-          /usr/bin/swiftc --version
 
       - name: 安装构建依赖
         env:
