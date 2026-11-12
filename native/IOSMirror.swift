@@ -536,8 +536,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
             .appendingPathComponent("lanadb-ios-\(UUID().uuidString).mov")
         // H.265 when a dedicated video connection supports it (.muxed connections
         // carry their own compressed stream and are remuxed below).
-        if let connection = movieOutput.connection(with: .video),
-           movieOutput.supportedOutputSettingsKeys(for: connection).contains(AVVideoCodecKey) {
+        if let connection = movieOutput.connection(with: .video), connection.isActive {
             movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
         }
         let includeAudio = !isGIF && RecordingSettings.recordsAudio
