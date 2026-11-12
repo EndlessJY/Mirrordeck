@@ -413,6 +413,7 @@ final class MirrorStore: ObservableObject {
         let webp = destination.pathExtension == "webp"
         let busy = "正在生成 GIF…"
         messages[id] = busy
+        converting += 1
         notifyMirror(id: id, kind: kind, success: true, message: busy, recording: true)
         DispatchQueue.global(qos: .userInitiated).async {
             let conversionError: String?
@@ -429,6 +430,7 @@ final class MirrorStore: ObservableObject {
             }
             try? FileManager.default.removeItem(at: source)
             DispatchQueue.main.async {
+                self.converting -= 1
                 self.finishCapture(id: id, kind: kind, destination: destination,
                                    error: conversionError)
             }
@@ -512,11 +514,13 @@ final class MirrorStore: ObservableObject {
     }
 
     private func finishCapture(id: String, kind: String, destination: URL, error: String?) {
+        messages[id] = nil
         if let error {
+            // The mirror shows it; with its window gone, the main window does.
+            if sessions[id] == nil { errors[id] = error }
             notifyMirror(id: id, kind: kind, success: false, message: error, recording: false)
             return
         }
-        messages[id] = nil
         errors[id] = nil
         let reveal = revealAutomatically
         let copied = copyAutomatically && Self.copyToClipboard(destination)
@@ -734,6 +738,12 @@ final class MirrorStore: ObservableObject {
                            output: String) {
         let id = device.identity
         guard processes[id] === process else { return }
+        // The window was closed while recording: the recording ends with it and
+        // is saved, instead of going on with no way to stop it.
+        if let recorder = recordingProcesses[id] {
+            recordingStops.insert(id)
+            if recorder.isRunning { recorder.terminate() }
+        }
         processes.removeValue(forKey: id)
         sessions.removeValue(forKey: id)
         sessionTokens.removeValue(forKey: id)
@@ -821,6 +831,14 @@ final class MirrorStore: ObservableObject {
 
     func stopAll() {
         startupTokens.removeAll()
-        for id in processes.keys { stop(deviceID: id) }
+        for id in Set(processes.keys).union(recordingProcesses.keys) { stop(deviceID: id) }
     }
+
+    /// A mirror, single-app window or recording is running, or a capture is
+    /// still being saved: closing the main window must not quit the app.
+    var hasActiveWork: Bool {
+        !processes.isEmpty || !recordingProcesses.isEmpty || !starting.isEmpty || converting > 0
+    }
+    /// GIF / WebP files still being made from a finished recording.
+    private var converting = 0
 }

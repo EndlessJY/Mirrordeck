@@ -14,8 +14,10 @@ final class AppleDeviceMonitor {
 
     func stop() {
         stopped = true
-        if socketHandle >= 0 { close(socketHandle) }
-        socketHandle = -1
+        // Wakes the listening thread, which closes the socket itself; closing
+        // it here as well would close whatever reused that descriptor.
+        let handle = socketHandle
+        if handle >= 0 { shutdown(handle, SHUT_RDWR) }
     }
 
     private func listen() {

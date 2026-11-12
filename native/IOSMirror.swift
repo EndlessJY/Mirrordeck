@@ -45,7 +45,7 @@ final class IOSMirrorStore: ObservableObject {
                 self.errors[id] = "需要相机权限才能显示 iPhone 画面：请在“系统设置 › 隐私与安全性 › 相机”中允许幕台。"
                 return
             }
-            Self.findCaptureDevice(named: device.marketName ?? "") { capture in
+            Self.findCaptureDevice(udid: id, named: device.marketName ?? "") { capture in
                 self.starting.remove(id)
                 guard let capture else {
                     self.errors[id] = "没有找到这台 iPhone 的画面。请解锁 iPhone，确认已点“信任”，必要时重新插拔数据线。"
@@ -70,6 +70,9 @@ final class IOSMirrorStore: ObservableObject {
         windows[deviceID]?.close()
     }
 
+    /// A window is open, starting, or still saving its recording.
+    var hasActiveWork: Bool { !windows.isEmpty || !starting.isEmpty }
+
     func stopAll() {
         windows.values.forEach { $0.close() }
     }
@@ -85,18 +88,23 @@ final class IOSMirrorStore: ObservableObject {
 
     /// The device's capture device appears up to a few seconds after the
     /// screen-capture switch is turned on.
-    private static func findCaptureDevice(named name: String, attempts: Int = 24,
+    /// Matched by the device's UDID (the capture device's unique ID); by name
+    /// only when that name is not shared by another connected iPhone.
+    private static func findCaptureDevice(udid: String, named name: String, attempts: Int = 24,
                                           completion: @escaping (AVCaptureDevice?) -> Void) {
         let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.external], mediaType: .muxed,
                                                        position: .unspecified).devices
             .filter { $0.modelID == "iOS Device" }
-        let match = devices.first { $0.localizedName == name } ?? (devices.count == 1 ? devices[0] : nil)
+        let key = { (text: String) in text.replacingOccurrences(of: "-", with: "").lowercased() }
+        let named = devices.filter { $0.localizedName == name }
+        let match = devices.first { key($0.uniqueID) == key(udid) } ??
+            (named.count == 1 ? named[0] : nil) ?? (devices.count == 1 ? devices[0] : nil)
         if match != nil || attempts <= 0 {
             completion(match)
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            findCaptureDevice(named: name, attempts: attempts - 1, completion: completion)
+            findCaptureDevice(udid: udid, named: name, attempts: attempts - 1, completion: completion)
         }
     }
 }
@@ -130,7 +138,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     private var latestFrame: CVPixelBuffer?
     private var window: NSWindow?
     private var previewLayer: AVCaptureVideoPreviewLayer?
-    private var sized = false
+    private var frameSize = CGSize.zero
     private var closing = false
     private var disconnectObserver: NSObjectProtocol?
     private var countdownTimer: Timer?
@@ -239,7 +247,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     /// fit the primary screen's usable area less a 96-point margin, with the
     /// title bar and tools above it. Resizing keeps the device's proportions,
     /// so there are no black bars.
-    private func fitWindow(width: Int, height: Int) {
+    private func fitWindow(width: Int, height: Int, keepPlace: Bool = false) {
         guard let window, let content = window.contentView, width > 0, height > 0 else { return }
         let ratio = CGFloat(width) / CGFloat(height)
         let screen = NSScreen.screens.first?.visibleFrame ?? window.screen?.visibleFrame ?? .zero
@@ -254,9 +262,15 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         let chrome = window.frame.height - content.frame.height   // title bar + tools
         let outer = NSSize(width: picture.width, height: picture.height + chrome)
         window.contentAspectRatio = NSSize(width: width, height: height)
-        let origin = NSPoint(x: (screen.midX - outer.width / 2).rounded(),
-                             y: (screen.midY - outer.height / 2).rounded())
-        window.setFrame(NSRect(origin: origin, size: outer), display: true)
+        // First frame: centred on the screen. On rotation: about the window's
+        // own centre, kept on the screen.
+        let centre = keepPlace ? NSPoint(x: window.frame.midX, y: window.frame.midY) :
+            NSPoint(x: screen.midX, y: screen.midY)
+        var origin = NSPoint(x: (centre.x - outer.width / 2).rounded(),
+                             y: (centre.y - outer.height / 2).rounded())
+        origin.x = min(max(origin.x, screen.minX), screen.maxX - outer.width)
+        origin.y = min(max(origin.y, screen.minY), screen.maxY - outer.height)
+        window.setFrame(NSRect(origin: origin, size: outer), display: true, animate: keepPlace)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -308,10 +322,15 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
                        from connection: AVCaptureConnection) {
         guard let frame = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         latestFrame = frame
-        if !sized {
-            sized = true
-            let width = CVPixelBufferGetWidth(frame), height = CVPixelBufferGetHeight(frame)
-            DispatchQueue.main.async { [weak self] in self?.fitWindow(width: width, height: height) }
+        // Sized on the first frame, and again when the device turns between
+        // portrait and landscape.
+        let size = CGSize(width: CVPixelBufferGetWidth(frame), height: CVPixelBufferGetHeight(frame))
+        if size != frameSize {
+            let first = frameSize == .zero
+            frameSize = size
+            DispatchQueue.main.async { [weak self] in
+                self?.fitWindow(width: Int(size.width), height: Int(size.height), keepPlace: !first)
+            }
         }
     }
 
@@ -692,6 +711,8 @@ private struct IOSMirrorOverlay: View {
                         .opacity(blink ? 0.25 : 1)
                         .animation(.easeInOut(duration: 0.8).repeatForever(), value: blink)
                         .onAppear { blink = true }
+                        // Reset, so the next recording's dot blinks again.
+                        .onDisappear { blink = false }
                     Text("\(kind == "gif" ? "GIF" : "录屏") \(String(format: "%02d:%02d", seconds / 60, seconds % 60))")
                         .monospacedDigit()
                 }

@@ -68,7 +68,7 @@ struct AppPickerView: View {
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
-                    .disabled(selection == nil)
+                    .disabled(target == nil)
             }
             .padding(14)
         }
@@ -151,8 +151,16 @@ struct AppPickerView: View {
         .tag(app.package)
     }
 
+    /// What Return or “打开” opens: the selected app if it is in the list now
+    /// shown; while searching with nothing shown selected, the best match.
+    private var target: DeviceApp? {
+        let shown = filtered
+        if let selection, let app = shown.first(where: { $0.package == selection }) { return app }
+        return searching ? shown.first : nil
+    }
+
     private func openSelected() {
-        guard let package = selection, let app = apps.first(where: { $0.package == package }) else { return }
+        guard let app = target else { return }
         store.openWindow(for: app, on: device, options: options)
         dismiss()
     }

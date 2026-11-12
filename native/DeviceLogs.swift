@@ -122,7 +122,7 @@ final class DeviceLogStore: ObservableObject {
         let input = Pipe()
         process.standardInput = input
         let request = (try? JSONSerialization.data(withJSONObject: ["serial": device.identity])) ?? Data()
-        input.fileHandleForWriting.write(request)
+        try? input.fileHandleForWriting.write(contentsOf: request)
         input.fileHandleForWriting.closeFile()
         return (process, input)
     }
@@ -157,7 +157,8 @@ final class DeviceLogStore: ObservableObject {
         process.standardError = pipe
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            // End of output: stop being called (it would repeat at full speed).
+            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
             self?.queue.async { self?.consume(data) }
         }
         process.terminationHandler = { [weak self] _ in
@@ -254,7 +255,7 @@ final class DeviceLogStore: ObservableObject {
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
-            try? process.run()
+            guard (try? process.run()) != nil else { return }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             let pids = Set(String(decoding: data, as: UTF8.self)

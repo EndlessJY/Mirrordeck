@@ -21,6 +21,7 @@ class AdbTestCase(unittest.TestCase):
             ("KNOWN_FILE", root / "known_endpoints.json"),
             ("TCPIP_FILE", root / "tcpip_attempts.json"),
             ("USB_WIRELESS_FILE", root / "usb_wireless_endpoints.json"),
+            ("SERVER_RESTART_FILE", root / "adb_server_restart"),
             ("find_adb", lambda: "/test/adb"),
         ):
             replacement = patch.object(adb_lan, name, value)
@@ -567,3 +568,26 @@ class NetworkScopeTests(AdbTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TransportKindTests(unittest.TestCase):
+    def test_mdns_wireless_debugging_is_a_network_transport(self):
+        serial = "adb-R5CT1234567-AbCdEf._adb-tls-connect._tcp"
+        self.assertTrue(adb_lan.is_mdns_transport(serial))
+        self.assertTrue(adb_lan.is_network_transport(serial))
+        self.assertTrue(adb_lan.is_network_transport("10.0.0.4:5555"))
+        self.assertFalse(adb_lan.is_network_transport("d537dfe4"))
+
+
+class ServerRestartCooldownTests(AdbTestCase):
+    def test_a_recent_restart_by_another_worker_is_not_repeated(self):
+        first, second = AdbLan(), AdbLan()        # two worker processes
+        calls = []
+        with (
+            patch.object(adb_lan, "active_mirror_process", return_value=False),
+            patch.object(first, "command", side_effect=lambda *a, **k: calls.append(a) or (0, "")),
+            patch.object(second, "command", side_effect=lambda *a, **k: calls.append(a) or (0, "")),
+        ):
+            self.assertTrue(first.restart_server())
+            self.assertFalse(second.restart_server())
+        self.assertEqual(calls.count(("kill-server",)), 1)

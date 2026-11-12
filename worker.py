@@ -1,6 +1,7 @@
 """JSON-lines bridge between the native macOS window and adb_lan.py."""
 
 import json
+import os
 import sys
 
 import ios_devices
@@ -18,6 +19,19 @@ def main():
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict):
         raise ValueError("请求格式错误")
+    # iPhone / iPad actions do not use adb, which may not be installed.
+    if action == "info" and payload.get("platform") == "ios":
+        emit({"info": {"sections": ios_devices.info(str(payload.get("serial", "")).strip()),
+                       "scope": "all"}})
+        return
+    if action == "ios_syslog":
+        # Streams until the app stops this process (the log window closed).
+        try:
+            ios_devices.stream_syslog(str(payload.get("serial", "")).strip(),
+                                      lambda line: print(line, flush=True))
+        except BrokenPipeError:
+            pass
+        return
     manager = AdbLan(progress=lambda message: emit({"progress": message}))
     usb_check = str(payload.get("usb_check", "")) == "1"
     if action == "scan":
@@ -31,16 +45,9 @@ def main():
             str(payload.get("endpoint", "")).strip(),
             str(payload.get("code", "")).strip(),
         )})
-    elif action == "info" and payload.get("platform") == "ios":
-        emit({"info": {"sections": ios_devices.info(str(payload.get("serial", "")).strip()),
-                       "scope": "all"}})
     elif action == "info":
         emit({"info": manager.device_info(str(payload.get("serial", "")).strip(),
                                           str(payload.get("scope", "all")))})
-    elif action == "ios_syslog":
-        # Streams until the app stops this process (the log window closed).
-        ios_devices.stream_syslog(str(payload.get("serial", "")).strip(),
-                                  lambda line: print(line, flush=True))
     elif action == "forget":
         emit({"result": manager.forget(str(payload.get("endpoint", "")).strip())})
     elif action == "reconnect":
@@ -55,6 +62,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except BrokenPipeError:
+        # The reader went away (a log window closed): nothing left to report.
+        os._exit(0)
     except Exception as exc:
         emit({"error": str(exc)})
         raise SystemExit(1)

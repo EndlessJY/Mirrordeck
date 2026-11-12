@@ -177,8 +177,10 @@ enum Worker {
                 process.standardError = output
                 try process.run()
                 let request = try JSONSerialization.data(withJSONObject: payload)
-                input.fileHandleForWriting.write(request)
-                input.fileHandleForWriting.closeFile()
+                // try write(contentsOf:): a worker that already exited makes
+                // this throw instead of raising an uncatchable exception.
+                try? input.fileHandleForWriting.write(contentsOf: request)
+                try? input.fileHandleForWriting.close()
 
                 let bytes = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
@@ -1191,7 +1193,9 @@ struct InfoRow: View {
         .buttonStyle(.plain)
         .onHover { inside in
             hovering = inside
-            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            // set(), not push()/pop(): a row removed while hovered never gets
+            // its exit call, and an unbalanced push left the hand everywhere.
+            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
         .help(item.value.contains("\n") ? "点按复制" : "\(item.value)\n点按复制")
         .animation(Theme.quick, value: copied)
@@ -1677,7 +1681,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DiscoveryMonitor.stopAll()
     }
 
+    /// Closing the main window quits only when nothing else is going on:
+    /// Android mirrors run in their own processes (not windows of this app),
+    /// and a capture may still be saving. Otherwise the app keeps running and
+    /// quits once the last of them ends with no window left open.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        if Self.busy {
+            NSLog("幕台：主窗口已关闭，仍有投屏或录制，继续运行")
+            watchUntilIdle()
+            return false
+        }
+        return true
+    }
+
+    private static var busy: Bool {
+        MirrorStore.shared.hasActiveWork || IOSMirrorStore.shared.hasActiveWork
+    }
+
+    private var idleTimer: Timer?
+
+    private func watchUntilIdle() {
+        idleTimer?.invalidate()
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] timer in
+            // The main window reopened (Dock icon): nothing to do.
+            if NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
+                timer.invalidate()
+                self?.idleTimer = nil
+                return
+            }
+            guard !Self.busy else { return }
+            NSLog("幕台：主窗口已关闭，投屏与录制都已结束，退出")
+            timer.invalidate()
+            self?.idleTimer = nil
+            NSApp.terminate(nil)
+        }
     }
 }

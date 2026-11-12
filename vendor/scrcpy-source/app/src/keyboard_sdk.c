@@ -376,6 +376,13 @@ lanadb_paste_text(struct sc_keyboard_sdk *kb, const char *text) {
         if (lanadb_pending_len + len >= LANADB_PENDING_MAX) {
             lanadb_flush_locked();
         }
+        if (len >= LANADB_PENDING_MAX) {
+            // LANADB: longer than the whole buffer: send it on its own,
+            // after what was waiting, instead of writing past the end.
+            lanadb_send_paste_locked(text);
+            sc_mutex_unlock(&lanadb_paste_mutex);
+            return;
+        }
         memcpy(lanadb_pending + lanadb_pending_len, text, len);
         lanadb_pending_len += len;
         if (!lanadb_paste_timer) {
@@ -437,7 +444,7 @@ sc_key_processor_process_text(struct sc_key_processor *kp,
     }
 
     if (kb->key_inject_mode == SC_KEY_INJECT_MODE_MIXED) {
-        char c = event->text[0];
+        unsigned char c = (unsigned char) event->text[0];
         if (isalpha(c) || c == ' ') {
             assert(event->text[1] == '\0');
             // Letters and space are handled as raw key events

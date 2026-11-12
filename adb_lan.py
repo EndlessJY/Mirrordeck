@@ -22,6 +22,10 @@ APP_DIR = Path.home() / "Library" / "Application Support" / "LAN ADB Manager"
 KNOWN_FILE = APP_DIR / "known_endpoints.json"
 TCPIP_FILE = APP_DIR / "tcpip_attempts.json"
 USB_WIRELESS_FILE = APP_DIR / "usb_wireless_endpoints.json"
+# Marks the last ADB server restart. Each scan runs in a new worker process,
+# so the cool-down lives on disk.
+SERVER_RESTART_FILE = APP_DIR / "adb_server_restart"
+SERVER_RESTART_COOLDOWN = 60
 # `adb tcpip` restarts adbd and drops the USB link. A device connection or an
 # app launch always checks again; periodic scans retry a failed attempt only
 # after the back-off. The guard stops the reconnect that `adb tcpip` itself
@@ -48,7 +52,7 @@ def run_command(args: list[str], timeout: float = 8) -> tuple[int, str]:
         env.pop(name, None)
     try:
         completed = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, env=env
+            args, capture_output=True, text=True, errors="replace", timeout=timeout, env=env
         )
         return completed.returncode, (completed.stdout + completed.stderr).strip()
     except subprocess.TimeoutExpired:
@@ -185,6 +189,16 @@ def endpoint_parts(endpoint: str) -> tuple[str, int] | None:
     except ValueError:
         return None
     return (match.group(1), port) if 1 <= port <= 65535 else None
+
+
+def is_mdns_transport(serial: str) -> bool:
+    """A wireless-debugging transport ADB connected through mDNS by itself,
+    named like `adb-<serial>-<id>._adb-tls-connect._tcp`: wireless, not USB."""
+    return "._adb-tls-connect." in serial or "._adb._tcp" in serial
+
+
+def is_network_transport(serial: str) -> bool:
+    return bool(endpoint_parts(serial)) or is_mdns_transport(serial)
 
 
 def port_open(endpoint: str, timeout: float = 0.45) -> bool:
@@ -624,6 +638,19 @@ class AdbLan:
         """Restart the local ADB server unless a projection depends on it."""
         if active_mirror_process():
             return False
+        # A restart reconnects the app's device tracker, which starts another
+        # scan; without a cool-down a lasting "no route" would restart it
+        # again and again.
+        try:
+            if time.time() - SERVER_RESTART_FILE.stat().st_mtime < SERVER_RESTART_COOLDOWN:
+                return False
+        except OSError:
+            pass
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            SERVER_RESTART_FILE.touch()
+        except OSError:
+            pass
         self.command("kill-server", timeout=5)
         self.command("start-server", timeout=6)
         self._last_server_restart = time.monotonic()
@@ -837,10 +864,11 @@ class AdbLan:
             wireless_identities = {
                 self._identity(endpoint)
                 for endpoint, item in before.items()
-                if endpoint_parts(endpoint) and item["state"] == "device"
+                if is_network_transport(endpoint) and item["state"] == "device"
             }
             for serial, item in before.items():
-                if endpoint_parts(serial) or serial.startswith("emulator-"):
+                # Only USB transports: never `adb tcpip` a wireless link.
+                if is_network_transport(serial) or serial.startswith("emulator-"):
                     continue
                 if item["state"] != "device":
                     usb_issues.append({"serial": serial, "state": item["state"]})
@@ -977,7 +1005,7 @@ class AdbLan:
                         **detail, "transports": [], "wireless": False
                     })
                     kind = "模拟器" if detail["emulator"] else (
-                        "无线" if endpoint_parts(serial) else "USB"
+                        "无线" if is_network_transport(serial) else "USB"
                     )
                     label = kind
                     if kind == "模拟器":
