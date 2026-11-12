@@ -15,6 +15,22 @@ final class IOSMirrorStore: ObservableObject {
     @Published private(set) var starting = Set<String>()
     @Published var errors: [String: String] = [:]
     private var windows: [String: IOSMirrorWindow] = [:]
+    /// Devices whose window closed because they were unplugged, by name: the
+    /// "已断开" notice goes away when that iPhone is connected again.
+    private var unplugged: [String: String] = [:]
+    private var connectObserver: NSObjectProtocol?
+
+    private init() {
+        connectObserver = NotificationCenter.default.addObserver(
+            forName: .AVCaptureDeviceWasConnected, object: nil, queue: .main) { [weak self] note in
+            guard let self, let device = note.object as? AVCaptureDevice,
+                  device.modelID == "iOS Device" else { return }
+            for (id, name) in self.unplugged where name == device.localizedName {
+                self.unplugged.removeValue(forKey: id)
+                self.errors[id] = nil
+            }
+        }
+    }
 
     /// Lets iOS devices appear as capture devices. Done at launch: a device
     /// shows up about a second later.
@@ -45,16 +61,21 @@ final class IOSMirrorStore: ObservableObject {
                 self.errors[id] = "需要相机权限才能显示 iPhone 画面：请在“系统设置 › 隐私与安全性 › 相机”中允许幕台。"
                 return
             }
-            Self.findCaptureDevice(udid: id, named: device.marketName ?? "") { capture in
+            Self.findCaptureDevice(named: device.marketName ?? "") { capture, duplicate in
                 self.starting.remove(id)
                 guard let capture else {
-                    self.errors[id] = "没有找到这台 iPhone 的画面。请解锁 iPhone，确认已点“信任”，必要时重新插拔数据线。"
+                    self.errors[id] = duplicate ?
+                        "连接了多台名为“\(device.title)”的设备，无法区分。请在其中一台的“设置 › 通用 › 关于本机 › 名称”中改名后重试。" :
+                        "没有找到这台 iPhone 的画面。请解锁 iPhone，确认已点“信任”，必要时重新插拔数据线。"
                     return
                 }
                 let window = IOSMirrorWindow(device: device, capture: capture) { [weak self] message in
                     self?.windows.removeValue(forKey: id)
                     self?.open.remove(id)
-                    if let message { self?.errors[id] = message }
+                    if let message {
+                        self?.errors[id] = message
+                        self?.unplugged[id] = device.marketName ?? ""
+                    }
                 }
                 if let failure = window.startCapture() {
                     self.errors[id] = failure
@@ -88,23 +109,29 @@ final class IOSMirrorStore: ObservableObject {
 
     /// The device's capture device appears up to a few seconds after the
     /// screen-capture switch is turned on.
-    /// Matched by the device's UDID (the capture device's unique ID); by name
-    /// only when that name is not shared by another connected iPhone.
-    private static func findCaptureDevice(udid: String, named name: String, attempts: Int = 24,
-                                          completion: @escaping (AVCaptureDevice?) -> Void) {
-        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.external], mediaType: .muxed,
-                                                       position: .unspecified).devices
-            .filter { $0.modelID == "iOS Device" }
-        let key = { (text: String) in text.replacingOccurrences(of: "-", with: "").lowercased() }
-        let named = devices.filter { $0.localizedName == name }
-        let match = devices.first { key($0.uniqueID) == key(udid) } ??
-            (named.count == 1 ? named[0] : nil) ?? (devices.count == 1 ? devices[0] : nil)
-        if match != nil || attempts <= 0 {
-            completion(match)
+    /// Matched by the device name, the one link macOS gives between a capture
+    /// device and the iPhone (its unique ID is a random UUID, not the UDID).
+    /// Two connected iPhones with the same name cannot be told apart, so that
+    /// is reported rather than guessed.
+    private static func findCaptureDevice(named name: String, attempts: Int = 24,
+                                          completion: @escaping (AVCaptureDevice?, Bool) -> Void) {
+        let named = AVCaptureDevice.DiscoverySession(deviceTypes: [.external], mediaType: .muxed,
+                                                     position: .unspecified).devices
+            .filter { $0.modelID == "iOS Device" && $0.localizedName == name }
+        if named.count > 1 {
+            completion(nil, true)
+            return
+        }
+        if let match = named.first {
+            completion(match, false)
+            return
+        }
+        if attempts <= 0 {
+            completion(nil, false)
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            findCaptureDevice(udid: udid, named: name, attempts: attempts - 1, completion: completion)
+            findCaptureDevice(named: name, attempts: attempts - 1, completion: completion)
         }
     }
 }
@@ -126,7 +153,7 @@ final class IOSMirrorModel: ObservableObject {
 final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutputSampleBufferDelegate,
                              AVCaptureFileOutputRecordingDelegate {
     let device: ADBDevice
-    private let capture: AVCaptureDevice
+    private var capture: AVCaptureDevice
     private let onClose: (String?) -> Void
     private let model = IOSMirrorModel()
     private let session = AVCaptureSession()
@@ -171,12 +198,51 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         audioPreview.volume = 0
         if session.canAddOutput(audioPreview) { session.addOutput(audioPreview) }
         makeWindow()
-        disconnectObserver = NotificationCenter.default.addObserver(
-            forName: .AVCaptureDeviceWasDisconnected, object: capture, queue: .main) { [weak self] _ in
-            self?.finish(message: "\(self?.device.title ?? "iPhone") 已断开。")
-        }
+        watchDisconnect()
         sessionQueue.async { [session] in session.startRunning() }
         return nil
+    }
+
+    /// The capture device also goes away for a moment when the iPhone turns
+    /// between portrait and landscape: it comes back (same unique ID) within a
+    /// second or two, and the picture continues. Only when it stays away (the
+    /// cable was pulled) does the window close.
+    private func watchDisconnect() {
+        if let observer = disconnectObserver { NotificationCenter.default.removeObserver(observer) }
+        disconnectObserver = NotificationCenter.default.addObserver(
+            forName: .AVCaptureDeviceWasDisconnected, object: capture, queue: .main) { [weak self] _ in
+            self?.reconnect(uniqueID: self?.capture.uniqueID ?? "", attempts: 24)
+        }
+    }
+
+    private func reconnect(uniqueID: String, attempts: Int) {
+        guard !closing else { return }
+        let back = AVCaptureDevice.DiscoverySession(deviceTypes: [.external], mediaType: .muxed,
+                                                    position: .unspecified).devices
+            .first { $0.uniqueID == uniqueID && $0.isConnected }
+        guard let back else {
+            if attempts <= 0 {
+                finish(message: "\(device.title) 已断开。")
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    self?.reconnect(uniqueID: uniqueID, attempts: attempts - 1)
+                }
+            }
+            return
+        }
+        guard let input = try? AVCaptureDeviceInput(device: back) else {
+            finish(message: "\(device.title) 已断开。")
+            return
+        }
+        capture = back
+        watchDisconnect()
+        sessionQueue.async { [session] in
+            session.beginConfiguration()
+            session.inputs.forEach { session.removeInput($0) }
+            if session.canAddInput(input) { session.addInput(input) }
+            session.commitConfiguration()
+            if !session.isRunning { session.startRunning() }
+        }
     }
 
     func bringForward() {
