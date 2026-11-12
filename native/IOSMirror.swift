@@ -301,6 +301,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = device.title
+        window.appearance = ThemeStore.shared.appearanceMode.nsAppearance
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.backgroundColor = .black
@@ -1010,9 +1011,11 @@ private struct IOSToolButton<Label: View>: View {
     let enabled: Bool
     let action: () -> Void
     @ViewBuilder let label: () -> Label
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var hovered = false
 
     var body: some View {
+        let _ = theme.style
         let tint: Color = !enabled ? Color.secondary.opacity(0.45) :
             (recording ? .red : (active ? Theme.accent : Color.primary.opacity(0.8)))
         let fill: Color = !enabled ? .clear :

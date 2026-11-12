@@ -55,6 +55,15 @@ enum LogLevel: Int, CaseIterable, Identifiable {
         case .error: return "仅错误"
         }
     }
+    var shortTitle: String {
+        switch self {
+        case .verbose: return "全部"
+        case .debug: return "调试"
+        case .info: return "信息"
+        case .warning: return "警告"
+        case .error: return "错误"
+        }
+    }
     static func rank(_ level: Character) -> Int {
         switch level {
         case "V": return 0
@@ -435,26 +444,48 @@ final class DeviceLogStore: ObservableObject {
 struct DeviceLogView: View {
     @ObservedObject var store: DeviceLogStore
     @ObservedObject private var apps = AppWindowStore.shared
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var follow = true
     @State private var selection = Set<Int>()
+    @State private var inspectorCopied = false
 
     var body: some View {
         let rows = store.filtered
+        let selectedEntries = rows.filter { selection.contains($0.id) }
         VStack(spacing: 0) {
             toolbar(rows: rows)
             Divider()
             if store.crashCount > 0 && !store.crashesOnly {
-                Button {
-                    store.crashesOnly = true
-                } label: {
-                    Label("发现 \(store.crashCount) 条崩溃记录，点按只看崩溃",
-                          systemImage: "exclamationmark.octagon.fill")
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if theme.isAppleNative {
+                    HStack {
+                        Label("捕获到 \(store.crashCount) 条崩溃异常记录",
+                              systemImage: "exclamationmark.octagon.fill")
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        Button("仅看崩溃栈") {
+                            store.crashesOnly = true
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Theme.recording)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Theme.recording.opacity(0.11))
+                    Divider()
+                } else {
+                    Button {
+                        store.crashesOnly = true
+                    } label: {
+                        Label("发现 \(store.crashCount) 条崩溃记录，点按只看崩溃",
+                              systemImage: "exclamationmark.octagon.fill")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(Color.red.opacity(0.85))
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(Color.red.opacity(0.85))
             }
             ScrollViewReader { proxy in
                 List(rows, selection: $selection) { entry in
@@ -470,7 +501,7 @@ struct DeviceLogView: View {
                 .listStyle(.plain)
                 .environment(\.defaultMinListRowHeight, 18)
                 .onCopyCommand {
-                    let lines = rows.filter { selection.contains($0.id) }.map(\.text)
+                    let lines = selectedEntries.map(\.text)
                     return [NSItemProvider(object: lines.joined(separator: "\n") as NSString)]
                 }
                 .onChange(of: rows.last?.id) { _, last in
@@ -478,15 +509,66 @@ struct DeviceLogView: View {
                     proxy.scrollTo(last, anchor: .bottom)
                 }
             }
+            if theme.isAppleNative && !selectedEntries.isEmpty {
+                Divider()
+                nativeInspector(selectedEntries)
+            }
             Divider()
             statusBar(count: rows.count)
         }
+        .tint(Theme.accent)
         .frame(minWidth: 760, minHeight: 420)
         .onAppear {
             store.start()
             if !store.device.isApple { apps.load(store.device) }
         }
         .onDisappear { store.stop() }
+    }
+
+    private func nativeInspector(_ entries: [LogEntry]) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entries.count == 1
+                     ? "选中行详情检视器（支持自由划词或一键整条复制）"
+                     : "已选中 \(entries.count) 行日志（支持自由划词或一键批量复制）")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                ScrollView {
+                    Text(entries.map(\.text).joined(separator: "\n"))
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 84)
+            }
+            HStack(spacing: 6) {
+                Button {
+                    copyLines(entries)
+                    withAnimation(Theme.quick) { inspectorCopied = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                        withAnimation(Theme.quick) { inspectorCopied = false }
+                    }
+                } label: {
+                    if inspectorCopied {
+                        Label("已复制", systemImage: "checkmark")
+                    } else {
+                        Text(entries.count == 1 ? "复制整条" : "复制选中")
+                    }
+                }
+                .controlSize(.small)
+                Button {
+                    selection.removeAll()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help("收起详情检视栏")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Theme.subtleFill)
     }
 
     private func copyLines(_ entries: [LogEntry]) {
@@ -498,29 +580,40 @@ struct DeviceLogView: View {
 
     private func toolbar(rows: [LogEntry]) -> some View {
         HStack(spacing: 10) {
-            TextField("搜索标签或内容", text: $store.query)
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 180)
-            Picker("级别", selection: $store.minimum) {
-                ForEach(LogLevel.allCases) { Text($0.title).tag($0) }
-            }
-            .labelsHidden()
-            .fixedSize()
-            if !store.device.isApple {
-                Picker("应用", selection: $store.appFilter) {
-                    Text("全部应用").tag(String?.none)
-                    let list = apps.apps[store.device.id] ?? []
-                    if !list.isEmpty { Divider() }
-                    ForEach(list) { app in
-                        Text(app.label).tag(Optional(app.package))
-                    }
+            if theme.isAppleNative {
+                if !store.device.isApple {
+                    appPickerControl
+                }
+                Picker("级别", selection: $store.minimum) {
+                    ForEach(LogLevel.allCases) { Text($0.shortTitle).tag($0) }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 170)
+                .pickerStyle(.segmented)
+                .fixedSize()
+                Toggle(store.crashCount > 0 ? "崩溃 (\(store.crashCount))" : "只看崩溃",
+                       isOn: $store.crashesOnly)
+                    .toggleStyle(.button)
+                    .tint(store.crashesOnly ? Theme.recording : nil)
+                Spacer(minLength: 0)
+                TextField("筛选关键字 / Tag…", text: $store.query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 170, maxWidth: 240)
+            } else {
+                TextField("搜索标签或内容", text: $store.query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 180)
+                Picker("级别", selection: $store.minimum) {
+                    ForEach(LogLevel.allCases) { Text($0.title).tag($0) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                if !store.device.isApple {
+                    appPickerControl
+                }
+                Toggle("只看崩溃", isOn: $store.crashesOnly)
+                    .toggleStyle(.button)
+                Spacer(minLength: 0)
             }
-            Toggle("只看崩溃", isOn: $store.crashesOnly)
-                .toggleStyle(.button)
-            Spacer(minLength: 0)
             Toggle(isOn: $follow) {
                 Label("跟随最新", systemImage: "arrow.down.to.line")
                     .labelStyle(.iconOnly)
@@ -544,6 +637,19 @@ struct DeviceLogView: View {
         .controlSize(.regular)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var appPickerControl: some View {
+        Picker("应用", selection: $store.appFilter) {
+            Text(theme.isAppleNative ? "全部进程" : "全部应用").tag(String?.none)
+            let list = apps.apps[store.device.id] ?? []
+            if !list.isEmpty { Divider() }
+            ForEach(list) { app in
+                Text(app.label).tag(Optional(app.package))
+            }
+        }
+        .labelsHidden()
+        .frame(maxWidth: 170)
     }
 
     private func statusBar(count: Int) -> some View {
@@ -635,6 +741,7 @@ enum DeviceLogWindows {
         if let existing = windows[device.identity] {
             existing.store.updateDevice(device)
             existing.window.title = "\(device.title) · 日志"
+            existing.window.appearance = ThemeStore.shared.appearanceMode.nsAppearance
             if !existing.store.running && device.connected {
                 existing.store.start()
             }
@@ -646,6 +753,7 @@ enum DeviceLogWindows {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = "\(device.title) · 日志"
+        window.appearance = ThemeStore.shared.appearanceMode.nsAppearance
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: DeviceLogView(store: store))
         // The hosting view sizes the window to its minimum; start roomier.

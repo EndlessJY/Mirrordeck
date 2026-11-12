@@ -646,6 +646,7 @@ final class DeviceStore: ObservableObject {
 struct SidebarSelection: ViewModifier {
     let selected: Bool
     @Environment(\.controlActiveState) private var activeState
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var hovering = false
 
     private var active: Bool { activeState == .key || activeState == .active }
@@ -660,6 +661,7 @@ struct SidebarSelection: ViewModifier {
                     .fill(selected ? (active ? Theme.accent : Color.primary.opacity(0.11)) :
                           hovering ? Color.primary.opacity(0.05) : Color.clear)
                     .animation(Theme.quick, value: selected)
+                    .animation(Theme.quick, value: theme.style)
             )
             .environment(\.sidebarRowHighlighted, selected && active)
             .contentShape(Rectangle())
@@ -685,12 +687,17 @@ struct SidebarRowContent: View {
     let subtitle: String
     var status: Color?
     var pulsing = false
+    var customIcon: AnyView? = nil
     @Environment(\.sidebarRowHighlighted) private var highlighted
 
     var body: some View {
         HStack(spacing: 10) {
-            IconTile(symbol: symbol, size: 30,
-                     style: highlighted ? .plain : .tinted(tint))
+            if let customIcon {
+                customIcon
+            } else {
+                IconTile(symbol: symbol, size: 30,
+                         style: highlighted ? .plain : .tinted(tint))
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.body.weight(.medium)).lineLimit(1)
                     .foregroundStyle(highlighted ? Color.white : Color.primary)
@@ -711,24 +718,30 @@ struct DeviceSidebarRow: View {
     let selected: Bool
     @ObservedObject private var mirror = MirrorStore.shared
     @ObservedObject private var iosMirror = IOSMirrorStore.shared
+    @ObservedObject private var theme = ThemeStore.shared
 
     var body: some View {
         let live = mirror.sessions[device.id] != nil || iosMirror.open.contains(device.id)
-        SidebarRowContent(symbol: device.symbol, tint: Theme.accent,
-                          title: device.title,
-                          subtitle: live ? "投屏中 · " + device.connectionSummary :
-                                           device.connectionSummary,
-                          status: !device.connected ? .gray : live ? Theme.accent : Theme.online,
-                          pulsing: live)
-            .modifier(SidebarSelection(selected: selected))
+        SidebarRowContent(
+            symbol: device.symbol,
+            tint: Theme.accent,
+            title: device.title,
+            subtitle: live ? "投屏中 · " + device.connectionSummary : device.connectionSummary,
+            status: !device.connected ? .gray : live ? Theme.accent : Theme.online,
+            pulsing: live,
+            customIcon: theme.isAppleNative ? AnyView(DeviceSidebarIcon(device: device)) : nil
+        )
+        .modifier(SidebarSelection(selected: selected))
     }
 }
 
 struct IssueSidebarRow: View {
     let issue: IssueItem
     let selected: Bool
+    @ObservedObject private var theme = ThemeStore.shared
 
     var body: some View {
+        let _ = theme.style
         SidebarRowContent(symbol: issue.symbol, tint: issue.tint,
                           title: issue.title, subtitle: issue.summary)
             .modifier(SidebarSelection(selected: selected))
@@ -911,13 +924,67 @@ final class DeviceInfoStore: ObservableObject {
     }
 }
 
+private struct StorageOverview {
+    let raw: String
+    let summaryText: String
+    let remainingText: String
+    let fraction: Double
+
+    static func parse(_ raw: String) -> StorageOverview? {
+        let parts = raw.split(separator: "/", maxSplits: 1)
+        guard parts.count == 2,
+              let used = parseAmount(parts[0], prefix: "已用"),
+              let total = parseAmount(parts[1], prefix: "共"),
+              total.bytes > 0 else { return nil }
+        let fraction = min(1.0, max(0.0, used.bytes / total.bytes))
+        let freeBytes = max(0.0, total.bytes - used.bytes)
+        return StorageOverview(
+            raw: raw,
+            summaryText: "\(used.display) / \(total.display)",
+            remainingText: "剩余可用 \(formatBytes(freeBytes))",
+            fraction: fraction
+        )
+    }
+
+    private static func parseAmount(_ part: Substring, prefix: String) -> (bytes: Double, display: String)? {
+        var text = part.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix(prefix) {
+            text = String(text.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let tokens = text.split(whereSeparator: \.isWhitespace)
+        guard tokens.count == 2, let value = Double(tokens[0]) else { return nil }
+        let unit = tokens[1].uppercased()
+        let scale: Double
+        switch unit {
+        case "TB": scale = 1024 * 1024 * 1024 * 1024
+        case "GB": scale = 1024 * 1024 * 1024
+        case "MB": scale = 1024 * 1024
+        case "KB": scale = 1024
+        case "B": scale = 1
+        default: return nil
+        }
+        return (value * scale, "\(tokens[0]) \(unit)")
+    }
+
+    private static func formatBytes(_ bytes: Double) -> String {
+        let gb = 1024.0 * 1024.0 * 1024.0
+        let tb = gb * 1024.0
+        let mb = 1024.0 * 1024.0
+        if bytes >= tb { return String(format: "%.2f TB", bytes / tb) }
+        if bytes >= gb { return String(format: "%.1f GB", bytes / gb) }
+        return String(format: "%.0f MB", max(0, bytes / mb))
+    }
+}
+
 struct DeviceDetail: View {
     let device: ADBDevice
     @ObservedObject private var mirror = MirrorStore.shared
     @ObservedObject private var info = DeviceInfoStore.shared
     @ObservedObject private var appWindows = AppWindowStore.shared
     @ObservedObject private var iosMirror = IOSMirrorStore.shared
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var pickingApp = false
+    @State private var storageCopied = false
     @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
     @AppStorage("mirror.maxFPS") private var maxFPS = 60
@@ -943,9 +1010,24 @@ struct DeviceDetail: View {
         return session.ready ? .live : .starting
     }
 
+    private var storageOverview: StorageOverview? {
+        info.value("存储", for: device.id).flatMap(StorageOverview.parse)
+    }
+
+    private var nativeSubtitle: String {
+        if device.isApple {
+            let parts = [info.value("系统", for: device.id), device.subtitle].compactMap { $0 }
+            return parts.isEmpty ? device.subtitle : parts.joined(separator: " · ")
+        }
+        let androidVer = info.value("Android", for: device.id).map { "Android \($0)" }
+        let rom = info.value("系统界面", for: device.id)
+        let parts = [androidVer, rom].compactMap { $0 }
+        return parts.isEmpty ? device.subtitle : parts.joined(separator: " · ")
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: theme.isAppleNative ? 20 : 26) {
                 header
                 if device.isApple, let error = iosMirror.errors[device.id] {
                     Banner(text: error)
@@ -956,13 +1038,21 @@ struct DeviceDetail: View {
                 } else if let message = mirror.messages[device.id] {
                     Banner(text: message, symbol: "record.circle", tint: Theme.recording)
                 }
-                connections
+                if theme.isAppleNative {
+                    nativeTelemetryStrip
+                } else {
+                    connections
+                }
                 infoSection
             }
             .frame(maxWidth: 780, alignment: .leading)
             .padding(Theme.pagePadding)
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .animation(Theme.quick, value: mirrorState)
+            .animation(Theme.quick, value: theme.style)
+        }
+        .sheet(isPresented: $pickingApp) {
+            AppPickerView(device: device, options: mirrorOptions)
         }
         // A different device starts at the top instead of the old scroll offset.
         .id(device.identity)
@@ -971,22 +1061,51 @@ struct DeviceDetail: View {
 
     // MARK: Header
 
+    @ViewBuilder
     private var header: some View {
-        HStack(alignment: .center, spacing: 16) {
-            IconTile(symbol: device.symbol, size: 64, style: .gradient)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(device.title)
-                    .font(.title2.weight(.semibold))
-                    .lineLimit(1)
-                    .textSelection(.enabled)
-                chips
+        if theme.isAppleNative {
+            HStack(alignment: .center, spacing: 16) {
+                DeviceHeroIllustration(device: device)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(device.title)
+                        .font(.title2.weight(.semibold))
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                    Text(nativeSubtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    chips
+                        .padding(.top, 2)
+                }
+                Spacer(minLength: 12)
+                tools
+                mirrorControl
             }
-            Spacer(minLength: 12)
-            tools
-            mirrorControl
-        }
-        .sheet(isPresented: $pickingApp) {
-            AppPickerView(device: device, options: mirrorOptions)
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                    .fill(Theme.cardFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                    .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+            )
+            .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
+        } else {
+            HStack(alignment: .center, spacing: 16) {
+                IconTile(symbol: device.symbol, size: 64, style: .gradient)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(device.title)
+                        .font(.title2.weight(.semibold))
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                    chips
+                }
+                Spacer(minLength: 12)
+                tools
+                mirrorControl
+            }
         }
     }
 
@@ -1059,6 +1178,7 @@ struct DeviceDetail: View {
                 Label("结束投屏", systemImage: "stop.fill")
             }
             .controlSize(.large)
+            .tint(theme.isAppleNative ? Theme.recording : nil)
             .help("关闭这台设备的投屏窗口")
             .transition(.opacity)
         case .idle:
@@ -1069,7 +1189,7 @@ struct DeviceDetail: View {
                     mirror.start(device: device, options: mirrorOptions)
                 }
             } label: {
-                Label("投屏", systemImage: "play.fill")
+                Label(theme.isAppleNative ? "开始投屏" : "投屏", systemImage: "play.fill")
                     .padding(.horizontal, 6)
             }
             .buttonStyle(.borderedProminent)
@@ -1087,7 +1207,167 @@ struct DeviceDetail: View {
         if device.isApple { iosMirror.stop(deviceID: device.id) } else { mirror.stop(deviceID: device.id) }
     }
 
-    // MARK: Connections
+    // MARK: Connections & Apple Native Telemetry
+
+    @ViewBuilder
+    private var nativeTelemetryStrip: some View {
+        if let storage = storageOverview {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    nativeStorageCard(storage)
+                        .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    nativeConnectionsCard
+                        .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                VStack(alignment: .leading, spacing: 16) {
+                    nativeStorageCard(storage)
+                    nativeConnectionsCard
+                }
+            }
+        } else {
+            nativeConnectionsCard
+        }
+    }
+
+    private func nativeStorageCard(_ storage: StorageOverview) -> some View {
+        Button {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(storage.raw, forType: .string)
+            withAnimation(Theme.quick) { storageCopied = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                withAnimation(Theme.quick) { storageCopied = false }
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack {
+                    Text("存储空间")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if storageCopied {
+                        Label("已复制", systemImage: "checkmark.circle.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.online)
+                    } else {
+                        Text(storage.summaryText)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.primary.opacity(0.09))
+                        Capsule()
+                            .fill(storage.fraction > 0.9 ? Theme.recording : Theme.accent)
+                            .frame(width: max(6, geo.size.width * storage.fraction))
+                    }
+                }
+                .frame(height: 8)
+                HStack {
+                    Text(storage.remainingText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int((storage.fraction * 100).rounded()))% 已使用")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(15)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                    .fill(Theme.cardFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                    .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+            )
+            .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("\(storage.raw)\n点按复制")
+    }
+
+    private var nativeConnectionsCard: some View {
+        let preferredEndpoint = MirrorStore.preferredTransports(for: device).first?.endpoint
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("连接通道")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if device.transports.count > 1 {
+                    Text("USB 在线时自动优先")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            VStack(spacing: 6) {
+                ForEach(device.transports, id: \.endpoint) { transport in
+                    let isPreferred = transport.state == "已连接" && transport.endpoint == preferredEndpoint
+                    HStack(spacing: 9) {
+                        Circle()
+                            .fill(transport.state != "已连接" ? Color.secondary.opacity(0.45) :
+                                  isPreferred ? Theme.online : Theme.accent)
+                            .frame(width: 7, height: 7)
+                        Text(transport.displayName)
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                        Text(transport.endpoint)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 4)
+                        if transport.state == "已连接" {
+                            Text(isPreferred ? "当前优先" : "热备")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(isPreferred ? Theme.online : .secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill((isPreferred ? Theme.online : Color.secondary).opacity(0.11))
+                                )
+                        } else {
+                            Text(transport.state)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Theme.subtleFill)
+                    )
+                }
+                if device.emulator {
+                    Text("同一模拟器的多个 ADB 端口已合并显示。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 2)
+                }
+            }
+        }
+        .padding(15)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                .fill(Theme.cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
+    }
 
     private var connections: some View {
         Card(title: "连接") {
@@ -1149,7 +1429,13 @@ struct DeviceDetail: View {
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text("设备信息").font(.headline)
+                Text(theme.isAppleNative ? "硬件与系统规格" : "设备信息")
+                    .font(.headline)
+                if theme.isAppleNative {
+                    Text("点按任意行复制")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
                 if info.fullLoading.contains(device.id) {
                     ProgressView().controlSize(.small)
@@ -1204,13 +1490,13 @@ struct DeviceDetail: View {
             }
         }
     }
-
 }
 
 /// Label on the left, value on the right; long technical strings stay on one
 /// line. Clicking the row copies the value; "已复制" shows in its place.
 struct InfoRow: View {
     let item: DeviceInfoSection.Item
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var hovering = false
     @State private var copied = false
     @State private var resetTask: DispatchWorkItem?
@@ -1221,7 +1507,16 @@ struct InfoRow: View {
                 Text(item.label).foregroundStyle(.secondary).fixedSize()
                 Spacer(minLength: 8)
                 ZStack(alignment: .trailing) {
-                    value.opacity(copied ? 0 : 1)
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        value
+                        if theme.isAppleNative {
+                            Image(systemName: "doc.on.doc")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .opacity(hovering ? 1 : 0)
+                        }
+                    }
+                    .opacity(copied ? 0 : 1)
                     if copied {
                         Label("已复制", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(Theme.online)
@@ -1236,16 +1531,18 @@ struct InfoRow: View {
             .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(hovering ? 0.05 : 0))
+                    .fill(Color.primary.opacity(hovering ? (theme.isAppleNative ? 0.035 : 0.05) : 0))
                     .padding(.horizontal, 4)
             )
         }
         .buttonStyle(.plain)
         .onHover { inside in
             hovering = inside
-            // set(), not push()/pop(): a row removed while hovered never gets
-            // its exit call, and an unbalanced push left the hand everywhere.
-            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+            if !theme.isAppleNative {
+                // set(), not push()/pop(): a row removed while hovered never gets
+                // its exit call, and an unbalanced push left the hand everywhere.
+                (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+            }
         }
         .help(item.value.contains("\n") ? "点按复制" : "\(item.value)\n点按复制")
         .animation(Theme.quick, value: copied)
@@ -1274,6 +1571,7 @@ struct InfoRow: View {
 }
 
 struct MirrorSettingsView: View {
+    @ObservedObject private var theme = ThemeStore.shared
     @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
     @AppStorage("mirror.maxFPS") private var maxFPS = 60
@@ -1317,9 +1615,18 @@ struct MirrorSettingsView: View {
                         Text("2560 像素").tag(2560)
                         Text("设备原始分辨率").tag(0)
                     }
-                    Picker("最高帧率", selection: $maxFPS) {
-                        ForEach([30, 45, 60, 90, 120], id: \.self) { value in
-                            Text("\(value) FPS").tag(value)
+                    if theme.isAppleNative {
+                        Picker("最高帧率", selection: $maxFPS) {
+                            ForEach([30, 45, 60, 90, 120], id: \.self) { value in
+                                Text("\(value)").tag(value)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    } else {
+                        Picker("最高帧率", selection: $maxFPS) {
+                            ForEach([30, 45, 60, 90, 120], id: \.self) { value in
+                                Text("\(value) FPS").tag(value)
+                            }
                         }
                     }
                     Picker("视频码率", selection: $videoBitrateMbps) {
@@ -1384,9 +1691,17 @@ struct MirrorSettingsView: View {
                     Toggle("录制设备声音", isOn: $recordAudio)
                 }
                 Section {
-                    Picker("格式", selection: $animatedFormat) {
-                        Text("GIF（兼容性最好）").tag("gif")
-                        Text("WebP（体积约为 GIF 的 1/3，画质更好）").tag("webp")
+                    if theme.isAppleNative {
+                        Picker("格式", selection: $animatedFormat) {
+                            Text("WebP（体积更小）").tag("webp")
+                            Text("GIF（兼容通用）").tag("gif")
+                        }
+                        .pickerStyle(.segmented)
+                    } else {
+                        Picker("格式", selection: $animatedFormat) {
+                            Text("GIF（兼容性最好）").tag("gif")
+                            Text("WebP（体积约为 GIF 的 1/3，画质更好）").tag("webp")
+                        }
                     }
                     Picker("画质", selection: $gifQuality) {
                         Text("高（最长边 1280 像素 · 15 帧/秒）").tag("high")
@@ -1400,8 +1715,145 @@ struct MirrorSettingsView: View {
             .formStyle(.grouped)
             .frame(minHeight: 510)
             .tabItem { Label("录制", systemImage: "record.circle") }
+
+            Form {
+                Section {
+                    HStack(spacing: 12) {
+                        ForEach(AppThemeStyle.allCases) { option in
+                            ThemeStyleOptionCard(
+                                option: option,
+                                selected: theme.style == option
+                            ) {
+                                withAnimation(Theme.quick) {
+                                    theme.style = option
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("界面主题")
+                } footer: {
+                    Text("切换后将实时热更新主窗口、应用面板、日志窗口与已打开的投屏窗口配色，无需重启应用。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("深浅外观") {
+                    Picker("外观模式", selection: $theme.appearanceMode) {
+                        ForEach(AppAppearanceMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .formStyle(.grouped)
+            .frame(minHeight: 380)
+            .tabItem { Label("外观", systemImage: "paintbrush") }
         }
+        .tint(Theme.accent)
         .frame(width: 540)
+    }
+}
+
+private struct ThemeStyleOptionCard: View {
+    let option: AppThemeStyle
+    let selected: Bool
+    let action: () -> Void
+
+    private var optionAccent: Color {
+        option == .appleNative ? Color(nsColor: .systemBlue) : Color(nsColor: .systemIndigo)
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                // Visual miniature preview of the theme's signature header & palette
+                HStack(spacing: 10) {
+                    if option == .classic {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color(nsColor: .systemIndigo), Color(nsColor: .systemPurple)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 30, height: 30)
+                            .overlay(
+                                Image(systemName: "smartphone")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.white)
+                            )
+                    } else {
+                        ZStack(alignment: .top) {
+                            RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                                .fill(Color(nsColor: .systemBlue).opacity(0.10))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4.5, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.65), lineWidth: 1.3)
+                                )
+                            Capsule()
+                                .fill(Color.primary.opacity(0.75))
+                                .frame(width: 6, height: 1.5)
+                                .padding(.top, 3)
+                        }
+                        .frame(width: 19, height: 30)
+                        .padding(.horizontal, 5.5)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        RoundedRectangle(cornerRadius: 2.5)
+                            .fill(Color.primary.opacity(0.75))
+                            .frame(width: 72, height: 6)
+                        HStack(spacing: 4) {
+                            Capsule()
+                                .fill(Color(nsColor: .systemGreen).opacity(0.22))
+                                .frame(width: 32, height: 6)
+                            Capsule()
+                                .fill(optionAccent.opacity(0.22))
+                                .frame(width: 26, height: 6)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Capsule()
+                        .fill(optionAccent)
+                        .frame(width: 28, height: 14)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.primary.opacity(0.04))
+                )
+
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selected ? optionAccent : .secondary)
+                    Text(option.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+                Text(option.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(selected ? optionAccent.opacity(0.07) : Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .strokeBorder(
+                        selected ? optionAccent : Color(nsColor: .separatorColor).opacity(0.6),
+                        lineWidth: selected ? 1.6 : 0.7
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1410,8 +1862,10 @@ struct IssueDetail: View {
     let connect: (String) -> Void
     let pair: (String) -> Void
     let forget: (String) -> Void
+    @ObservedObject private var theme = ThemeStore.shared
 
     var body: some View {
+        let _ = theme.style
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 16) {
@@ -1477,6 +1931,7 @@ struct ActionRequest: Identifiable {
 struct ActionSheetView: View {
     @EnvironmentObject var store: DeviceStore
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var theme = ThemeStore.shared
     let mode: ActionSheet
     let suggestedEndpoint: String
     @State private var endpoint = ""
@@ -1536,6 +1991,7 @@ struct ActionSheetView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(store.actionBusy || store.actionQueued || trimmedEndpoint.isEmpty ||
                           (mode == .pair && trimmedCode.count != 6))
@@ -1552,6 +2008,7 @@ struct ActionSheetView: View {
 struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
     @StateObject private var store = DeviceStore()
+    @ObservedObject private var theme = ThemeStore.shared
     @State private var activeSheet: ActionRequest?
     /// The sidebar stays closed until the first scan has a result, then
     /// slides open, so launch shows one calm loading state instead of an
@@ -1586,7 +2043,8 @@ struct ContentView: View {
                                     .listRowBackground(Color.clear)
                             }
                         } header: {
-                            SidebarHeader(title: "设备", count: report.devices.count,
+                            SidebarHeader(title: theme.isAppleNative ? "已连接设备" : "设备",
+                                          count: report.devices.count,
                                           searching: !store.initialSweepDone)
                         }
                     }
@@ -1752,6 +2210,7 @@ struct LANADBManagerApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ThemeStore.shared.applyAppearance()
         // iPhones then appear as capture devices by the time one is mirrored.
         IOSMirrorStore.enableScreenCaptureDevices()
         DispatchQueue.global(qos: .utility).async { DeviceActions.removeTemporaryFiles() }
