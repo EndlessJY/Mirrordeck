@@ -13,12 +13,21 @@ final class IOSMirrorStore: ObservableObject {
 
     @Published private(set) var open = Set<String>()
     @Published private(set) var starting = Set<String>()
+    @Published private(set) var savingCount = 0
     @Published var errors: [String: String] = [:]
     private var windows: [String: IOSMirrorWindow] = [:]
     /// Devices whose window closed because they were unplugged, by name: the
     /// "已断开" notice goes away when that iPhone is connected again.
     private var unplugged: [String: String] = [:]
     private var connectObserver: NSObjectProtocol?
+
+    fileprivate func beginSaving() {
+        DispatchQueue.main.async { self.savingCount += 1 }
+    }
+
+    fileprivate func endSaving() {
+        DispatchQueue.main.async { self.savingCount = max(0, self.savingCount - 1) }
+    }
 
     private init() {
         connectObserver = NotificationCenter.default.addObserver(
@@ -92,7 +101,7 @@ final class IOSMirrorStore: ObservableObject {
     }
 
     /// A window is open, starting, or still saving its recording.
-    var hasActiveWork: Bool { !windows.isEmpty || !starting.isEmpty }
+    var hasActiveWork: Bool { !windows.isEmpty || !starting.isEmpty || savingCount > 0 }
 
     func stopAll() {
         windows.values.forEach { $0.close() }
@@ -139,6 +148,7 @@ final class IOSMirrorStore: ObservableObject {
 /// What the window's title bar and overlay show.
 final class IOSMirrorModel: ObservableObject {
     @Published var pinned = false
+    @Published var audioAllowed = true
     @Published var audioOn = false
     @Published var captureKind: String?        // "record" or "gif"
     @Published var countdown = 0
@@ -160,6 +170,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     private let videoOutput = AVCaptureVideoDataOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
     private let audioPreview = AVCaptureAudioPreviewOutput()
+    private let ciContext = CIContext()
     private let frameQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.frames")
     private let sessionQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.session")
     private var latestFrame: CVPixelBuffer?
@@ -168,10 +179,12 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     private var frameSize = CGSize.zero
     private var closing = false
     private var disconnectObserver: NSObjectProtocol?
+    private var defaultsObserver: NSObjectProtocol?
     private var countdownTimer: Timer?
     private var recordingSource: URL?
     private var recordingDestination: URL?
     private var recordingKind = "record"
+    private var recordingIncludesAudio = false
     /// Keeps the window object alive while a recording finishes after close.
     private var keepAlive: IOSMirrorWindow?
 
@@ -195,8 +208,22 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         videoOutput.setSampleBufferDelegate(self, queue: frameQueue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
         if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+        let audioAllowed = UserDefaults.standard.object(forKey: "mirror.audio") as? Bool ?? true
+        model.audioAllowed = audioAllowed
         audioPreview.volume = 0
         if session.canAddOutput(audioPreview) { session.addOutput(audioPreview) }
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            let allowed = UserDefaults.standard.object(forKey: "mirror.audio") as? Bool ?? true
+            if self.model.audioAllowed != allowed {
+                self.model.audioAllowed = allowed
+                if !allowed, self.model.audioOn {
+                    self.model.audioOn = false
+                    self.audioPreview.volume = 0
+                }
+            }
+        }
         makeWindow()
         watchDisconnect()
         sessionQueue.async { [session] in session.startRunning() }
@@ -227,6 +254,19 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                     self?.reconnect(uniqueID: uniqueID, attempts: attempts - 1)
                 }
+            }
+            return
+        }
+        // If the exact same capture device re-attached while a recording is still
+        // running, keep the existing input attached so the recording is not cut.
+        let keepExistingInput = movieOutput.isRecording && session.inputs.contains {
+            ($0 as? AVCaptureDeviceInput)?.device === back
+        }
+        if keepExistingInput {
+            capture = back
+            watchDisconnect()
+            sessionQueue.async { [session] in
+                if !session.isRunning { session.startRunning() }
             }
             return
         }
@@ -350,7 +390,14 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         closing = true
         closeMessage = message
         countdownTimer?.invalidate()
-        if let observer = disconnectObserver { NotificationCenter.default.removeObserver(observer) }
+        if let observer = disconnectObserver {
+            NotificationCenter.default.removeObserver(observer)
+            disconnectObserver = nil
+        }
+        if let observer = defaultsObserver {
+            NotificationCenter.default.removeObserver(observer)
+            defaultsObserver = nil
+        }
         // Stays alive until the capture is fully torn down: releasing the
         // window and its preview while the session is still stopping on its
         // queue blocks the main thread.
@@ -368,6 +415,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     /// lets the store forget this window.
     private func tearDown() {
         let message = closeMessage
+        frameQueue.async { [weak self] in self?.latestFrame = nil }
         sessionQueue.async { [weak self, session] in
             session.stopRunning()
             DispatchQueue.main.async {
@@ -408,6 +456,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     }
 
     private func toggleSound() {
+        guard model.audioAllowed else { return }
         model.audioOn.toggle()
         audioPreview.volume = model.audioOn ? 1 : 0
     }
@@ -426,9 +475,9 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
             withAnimation(.easeOut(duration: 0.32)) { self?.model.flash = false }
         }
         let device = device
+        let context = ciContext
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let image = CIImage(cvPixelBuffer: frame)
-            let context = CIContext()
             let saved: URL? = {
                 guard let picture = context.createCGImage(image, from: image.extent),
                       let destination = DeviceActions.destination(for: device, kind: "截图",
@@ -485,14 +534,18 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         }
         let source = FileManager.default.temporaryDirectory
             .appendingPathComponent("lanadb-ios-\(UUID().uuidString).mov")
-        // H.265, as the Android recordings default to (every Apple-silicon Mac encodes it).
-        if let connection = movieOutput.connection(with: .video) {
+        // H.265 when a dedicated video connection supports it (.muxed connections
+        // carry their own compressed stream and are remuxed below).
+        if let connection = movieOutput.connection(with: .video),
+           movieOutput.availableVideoCodecTypes.contains(.hevc) {
             movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
         }
-        movieOutput.connection(with: .audio)?.isEnabled = !isGIF && RecordingSettings.recordsAudio
+        let includeAudio = !isGIF && RecordingSettings.recordsAudio
+        movieOutput.connection(with: .audio)?.isEnabled = includeAudio
         recordingSource = source
         recordingDestination = destination
         recordingKind = kind
+        recordingIncludesAudio = includeAudio
         movieOutput.startRecording(to: source, recordingDelegate: self)
         model.recordingStarted = Date()
     }
@@ -501,10 +554,14 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
                     from connections: [AVCaptureConnection], error: Error?) {
         let kind = recordingKind
         let destination = recordingDestination
-        // AVFoundation reports a stop as an "error" while the file is fine.
+        let includeAudio = recordingIncludesAudio
+        // AVFoundation reports a stop or device rotation disconnect with
+        // AVErrorRecordingSuccessfullyFinishedKey = true when the file is intact.
         let usable = (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? (error == nil)
+        IOSMirrorStore.shared.beginSaving()
         let finished: (URL?) -> Void = { [weak self] saved in
             try? FileManager.default.removeItem(at: outputFileURL)
+            IOSMirrorStore.shared.endSaving()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.model.busy = nil
@@ -533,24 +590,181 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
                 }
                 return
             }
-            // QuickTime movie → MP4 without re-encoding (H.265 + AAC), the
-            // form chat apps send as a playable video.
-            let asset = AVURLAsset(url: outputFileURL)
-            guard let export = AVAssetExportSession(asset: asset,
-                                                    presetName: AVAssetExportPresetPassthrough) else {
-                finished(nil)
-                return
-            }
-            export.outputURL = destination
-            export.outputFileType = .mp4
-            export.shouldOptimizeForNetworkUse = true
-            export.exportAsynchronously {
-                finished(export.status == .completed ? destination : nil)
+            Self.exportMP4(from: outputFileURL, to: destination, includeAudio: includeAudio) { ok in
+                finished(ok ? destination : nil)
             }
         }
     }
 
-    /// Saved: copy and reveal as the settings say, and confirm in the pill.
+    /// Converts the captured `.mov` into `.mp4`: passes H.264/HEVC video packets
+    /// straight through without re-encoding and encodes LPCM audio to AAC (since
+    /// `.mp4` rejects uncompressed LPCM), falling back to `AVAssetExportSession`
+    /// if the source video codec requires transcoding.
+    private static func exportMP4(from source: URL, to destination: URL, includeAudio: Bool,
+                                  completion: @escaping (Bool) -> Void) {
+        try? FileManager.default.removeItem(at: destination)
+        let asset = AVURLAsset(url: source)
+        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+            completion(false)
+            return
+        }
+        let subType: CMVideoCodecType? = videoTrack.formatDescriptions.first.map {
+            CMFormatDescriptionGetMediaSubType($0 as! CMFormatDescription)
+        }
+        let canPassthroughVideo = subType == kCMVideoCodecType_HEVC || subType == kCMVideoCodecType_H264
+        if canPassthroughVideo, remuxVideoPassthrough(asset: asset, videoTrack: videoTrack,
+                                                      to: destination, includeAudio: includeAudio,
+                                                      completion: completion) {
+            return
+        }
+        exportTranscoded(asset: asset, videoTrack: videoTrack, to: destination,
+                         includeAudio: includeAudio, completion: completion)
+    }
+
+    private static func remuxVideoPassthrough(asset: AVAsset, videoTrack: AVAssetTrack,
+                                              to destination: URL, includeAudio: Bool,
+                                              completion: @escaping (Bool) -> Void) -> Bool {
+        guard let reader = try? AVAssetReader(asset: asset),
+              let writer = try? AVAssetWriter(outputURL: destination, fileType: .mp4) else {
+            return false
+        }
+        writer.shouldOptimizeForNetworkUse = true
+        let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
+        videoOut.alwaysCopiesSampleData = false
+        let formatHint = videoTrack.formatDescriptions.first.map { $0 as! CMFormatDescription }
+        let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: formatHint)
+        videoIn.transform = videoTrack.preferredTransform
+        guard reader.canAdd(videoOut), writer.canAdd(videoIn) else { return false }
+        reader.add(videoOut)
+        writer.add(videoIn)
+
+        var audioPair: (AVAssetReaderTrackOutput, AVAssetWriterInput)?
+        if includeAudio, let audioTrack = asset.tracks(withMediaType: .audio).first {
+            let pcmSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+            let aacSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128_000,
+            ]
+            let audioOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
+            audioOut.alwaysCopiesSampleData = false
+            let audioIn = AVAssetWriterInput(mediaType: .audio, outputSettings: aacSettings)
+            if reader.canAdd(audioOut), writer.canAdd(audioIn) {
+                reader.add(audioOut)
+                writer.add(audioIn)
+                audioPair = (audioOut, audioIn)
+            }
+        }
+
+        guard writer.startWriting(), reader.startReading() else {
+            try? FileManager.default.removeItem(at: destination)
+            return false
+        }
+        writer.startSession(atSourceTime: .zero)
+
+        let group = DispatchGroup()
+        let videoQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.remux.video")
+        group.enter()
+        var videoFinished = false
+        videoIn.requestMediaDataWhenReady(on: videoQueue) {
+            while videoIn.isReadyForMoreMediaData, !videoFinished {
+                var ended = false
+                autoreleasepool {
+                    if let sample = videoOut.copyNextSampleBuffer() {
+                        if !videoIn.append(sample) { ended = true }
+                    } else {
+                        ended = true
+                    }
+                }
+                if ended {
+                    videoFinished = true
+                    videoIn.markAsFinished()
+                    group.leave()
+                }
+            }
+        }
+
+        if let (audioOut, audioIn) = audioPair {
+            let audioQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.remux.audio")
+            group.enter()
+            var audioFinished = false
+            audioIn.requestMediaDataWhenReady(on: audioQueue) {
+                while audioIn.isReadyForMoreMediaData, !audioFinished {
+                    var ended = false
+                    autoreleasepool {
+                        if let sample = audioOut.copyNextSampleBuffer() {
+                            if !audioIn.append(sample) { ended = true }
+                        } else {
+                            ended = true
+                        }
+                    }
+                    if ended {
+                        audioFinished = true
+                        audioIn.markAsFinished()
+                        group.leave()
+                    }
+                }
+            }
+        }
+
+        group.notify(queue: .global(qos: .userInitiated)) {
+            if reader.status == .failed {
+                writer.cancelWriting()
+                try? FileManager.default.removeItem(at: destination)
+                exportTranscoded(asset: asset, videoTrack: videoTrack, to: destination,
+                                 includeAudio: includeAudio, completion: completion)
+                return
+            }
+            writer.finishWriting {
+                if writer.status == .completed {
+                    completion(true)
+                } else {
+                    try? FileManager.default.removeItem(at: destination)
+                    exportTranscoded(asset: asset, videoTrack: videoTrack, to: destination,
+                                     includeAudio: includeAudio, completion: completion)
+                }
+            }
+        }
+        return true
+    }
+
+    private static func exportTranscoded(asset: AVAsset, videoTrack: AVAssetTrack,
+                                         to destination: URL, includeAudio: Bool,
+                                         completion: @escaping (Bool) -> Void) {
+        try? FileManager.default.removeItem(at: destination)
+        let composition = AVMutableComposition()
+        guard let compVideo = composition.addMutableTrack(
+            withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+              (try? compVideo.insertTimeRange(videoTrack.timeRange, of: videoTrack, at: .zero)) != nil else {
+            completion(false)
+            return
+        }
+        compVideo.preferredTransform = videoTrack.preferredTransform
+        if includeAudio, let audioTrack = asset.tracks(withMediaType: .audio).first,
+           let compAudio = composition.addMutableTrack(
+               withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try? compAudio.insertTimeRange(audioTrack.timeRange, of: audioTrack, at: .zero)
+        }
+        guard let export = AVAssetExportSession(asset: composition,
+                                                presetName: AVAssetExportPresetHighestQuality) else {
+            completion(false)
+            return
+        }
+        export.outputURL = destination
+        export.outputFileType = .mp4
+        export.shouldOptimizeForNetworkUse = true
+        export.exportAsynchronously {
+            completion(export.status == .completed)
+        }
+    }
+
     /// Saved: the thumbnail shrinks into the corner, and the file is copied
     /// and revealed as the settings say, as in the Android window.
     private func delivered(_ url: URL) {
@@ -692,52 +906,108 @@ private struct IOSMirrorToolbar: View {
     let gif: () -> Void
 
     var body: some View {
+        let recordSelected = model.captureKind == "record"
+        let gifSelected = model.captureKind == "gif"
+        let recordPending = model.busy != nil && recordSelected
+        let gifPending = model.busy != nil && gifSelected
         // The Android window's tool metrics: 27×26 buttons, 31.5-point step,
         // 16-point symbols, a 27-point bar.
         HStack(spacing: 4.5) {
-            tool(model.pinned ? "pin.fill" : "pin", "置顶窗口", active: model.pinned, action: pin)
-            tool(model.audioOn ? "speaker.wave.2.fill" : "speaker.slash", model.audioOn ? "关闭声音" : "播放声音",
-                 active: model.audioOn, action: sound)
-            tool("camera", "保存截图", action: screenshot)
-                .disabled(model.screenshotSaving)
-            tool(model.captureKind == "record" ? "stop.circle.fill" : "record.circle",
-                 model.captureKind == "record" ? "停止录屏" : "开始录屏",
-                 recording: model.captureKind == "record", action: record)
-                .disabled(model.busy != nil || (model.captureKind != nil && model.captureKind != "record"))
-            Button(action: gif) {
-                Group {
-                    if model.captureKind == "gif" {
-                        Image(systemName: "stop.circle.fill").font(.system(size: 16, weight: .medium))
-                    } else {
-                        Text("GIF").font(.system(size: 12, weight: .bold))
-                    }
-                }
-                .frame(width: 27, height: 26)
-                .foregroundStyle(model.captureKind == "gif" ? Color.red : Color.primary.opacity(0.75))
-                .contentShape(Rectangle())
+            IOSToolButton(
+                help: model.pinned ? "已置顶，点击取消" : "置顶窗口",
+                active: model.pinned,
+                recording: false,
+                enabled: true,
+                action: pin
+            ) {
+                Image(systemName: model.pinned ? "pin.fill" : "pin")
+                    .font(.system(size: 16, weight: .medium))
             }
-            .buttonStyle(.plain)
-            .help(model.captureKind == "gif" ? "停止录制 GIF" : "录制 GIF")
-            .disabled(model.busy != nil || (model.captureKind != nil && model.captureKind != "gif"))
+            IOSToolButton(
+                help: !model.audioAllowed ? "未播放设备声音，请在设置中开启" :
+                      (model.audioOn ? "关闭声音" : "播放声音"),
+                active: model.audioAllowed && model.audioOn,
+                recording: false,
+                enabled: model.audioAllowed,
+                action: sound
+            ) {
+                Image(systemName: model.audioAllowed && model.audioOn ? "speaker.wave.2.fill" : "speaker.slash")
+                    .font(.system(size: 16, weight: .medium))
+            }
+            IOSToolButton(
+                help: model.screenshotSaving ? "正在保存截图" : "保存截图",
+                active: false,
+                recording: false,
+                enabled: !model.screenshotSaving,
+                action: screenshot
+            ) {
+                Image(systemName: model.screenshotSaving ? "hourglass" : "camera")
+                    .font(.system(size: 16, weight: .medium))
+            }
+            IOSToolButton(
+                help: recordPending ? "正在处理录屏" :
+                      (model.countdown > 0 && recordSelected ? "取消录屏倒计时" :
+                      (recordSelected ? "停止录屏" : "开始录屏")),
+                active: recordSelected && !recordPending,
+                recording: recordSelected && !recordPending,
+                enabled: model.busy == nil && (model.captureKind == nil || recordSelected),
+                action: record
+            ) {
+                Image(systemName: recordPending ? "hourglass" :
+                      (recordSelected && model.recordingStarted != nil ? "stop.circle.fill" : "record.circle"))
+                    .font(.system(size: 16, weight: .medium))
+            }
+            IOSToolButton(
+                help: gifPending ? "正在处理 GIF" :
+                      (model.countdown > 0 && gifSelected ? "取消 GIF 倒计时" :
+                      (gifSelected ? "停止录制 GIF" : "录制 GIF")),
+                active: gifSelected && !gifPending,
+                recording: gifSelected && !gifPending,
+                enabled: model.busy == nil && (model.captureKind == nil || gifSelected),
+                action: gif
+            ) {
+                if gifPending {
+                    Image(systemName: "hourglass").font(.system(size: 16, weight: .medium))
+                } else if gifSelected && model.recordingStarted != nil {
+                    Image(systemName: "stop.circle.fill").font(.system(size: 16, weight: .medium))
+                } else {
+                    Text("GIF").font(.system(size: 12, weight: .bold))
+                }
+            }
             Spacer(minLength: 0)
         }
         .padding(.leading, leading)
         .padding(.top, 1)
         .frame(height: 27)
     }
+}
 
-    private func tool(_ symbol: String, _ help: String, active: Bool = false, recording: Bool = false,
-                      action: @escaping () -> Void) -> some View {
+private struct IOSToolButton<Label: View>: View {
+    let help: String
+    let active: Bool
+    let recording: Bool
+    let enabled: Bool
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+    @State private var hovered = false
+
+    var body: some View {
+        let tint: Color = !enabled ? Color.secondary.opacity(0.45) :
+            (recording ? .red : (active ? Theme.accent : Color.primary.opacity(0.8)))
+        let fill: Color = !enabled ? .clear :
+            (recording ? Color.red.opacity(0.16) :
+             active ? Theme.accent.opacity(0.16) :
+             hovered ? Color.primary.opacity(0.08) : .clear)
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 16, weight: .medium))
+            label()
                 .frame(width: 27, height: 26)
-                .foregroundStyle(recording ? Color.red : active ? Theme.accent : Color.primary.opacity(0.75))
-                .background(RoundedRectangle(cornerRadius: 6)
-                    .fill(active ? Theme.accent.opacity(0.14) : Color.clear))
+                .foregroundStyle(tint)
+                .background(RoundedRectangle(cornerRadius: 6).fill(fill))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!enabled)
+        .onHover { hovered = $0 }
         .help(help)
     }
 }
@@ -759,16 +1029,25 @@ private struct IOSMirrorOverlay: View {
                     .transition(.scale(scale: 1.25).combined(with: .opacity))
             }
             if model.flash { Color.white.opacity(0.85) }
-            VStack {
-                pill.padding(.top, 12)
+            VStack(spacing: 6) {
+                statusPill
+                if let notice = model.notice {
+                    capsule {
+                        Image(systemName: model.noticeIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(model.noticeIsError ? Color.yellow : Color.green)
+                        Text(notice)
+                    }
+                    .transition(.opacity)
+                }
                 Spacer()
             }
+            .padding(.top, 12)
         }
         .animation(.spring(duration: 0.3), value: model.countdown)
     }
 
     @ViewBuilder
-    private var pill: some View {
+    private var statusPill: some View {
         if let started = model.recordingStarted, let kind = model.captureKind {
             TimelineView(.periodic(from: started, by: 1)) { context in
                 let seconds = max(0, Int(context.date.timeIntervalSince(started)))
@@ -790,13 +1069,6 @@ private struct IOSMirrorOverlay: View {
                 ProgressView().controlSize(.small).colorScheme(.dark)
                 Text(busy).foregroundStyle(.white.opacity(0.85))
             }
-        } else if let notice = model.notice {
-            capsule {
-                Image(systemName: model.noticeIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .foregroundStyle(model.noticeIsError ? Color.yellow : Color.green)
-                Text(notice)
-            }
-            .transition(.opacity)
         }
     }
 

@@ -286,15 +286,19 @@ static sc_tick lanadb_last_paste;
 static SDL_TimerID lanadb_paste_timer;
 
 // Texts pasted for typing; their echo from the device clipboard must not
-// overwrite the Mac clipboard.
+// overwrite the Mac clipboard. Consumed once or expired after 5 seconds so
+// copying the same text on the phone later still reaches the Mac.
 #define LANADB_RECENT_COUNT 16
+#define LANADB_RECENT_TTL SC_TICK_FROM_SEC(5)
 static char *lanadb_recent[LANADB_RECENT_COUNT];
+static sc_tick lanadb_recent_at[LANADB_RECENT_COUNT];
 static size_t lanadb_recent_next;
 
 static void
 lanadb_remember_locked(const char *text) {
     free(lanadb_recent[lanadb_recent_next]);
     lanadb_recent[lanadb_recent_next] = strdup(text);
+    lanadb_recent_at[lanadb_recent_next] = sc_tick_now();
     lanadb_recent_next = (lanadb_recent_next + 1) % LANADB_RECENT_COUNT;
 }
 
@@ -304,9 +308,20 @@ sc_lanadb_is_typing_paste(const char *text) {
         return false;
     }
     bool found = false;
+    sc_tick now = sc_tick_now();
     sc_mutex_lock(&lanadb_paste_mutex);
     for (size_t i = 0; i < LANADB_RECENT_COUNT; ++i) {
-        if (lanadb_recent[i] && !strcmp(lanadb_recent[i], text)) {
+        if (!lanadb_recent[i]) {
+            continue;
+        }
+        if (now - lanadb_recent_at[i] > LANADB_RECENT_TTL) {
+            free(lanadb_recent[i]);
+            lanadb_recent[i] = NULL;
+            continue;
+        }
+        if (!strcmp(lanadb_recent[i], text)) {
+            free(lanadb_recent[i]);
+            lanadb_recent[i] = NULL;
             found = true;
             break;
         }
@@ -402,6 +417,11 @@ lanadb_flush_pending(void) {
     sc_mutex_lock(&lanadb_paste_mutex);
     lanadb_flush_locked();
     sc_mutex_unlock(&lanadb_paste_mutex);
+}
+
+void
+sc_lanadb_flush_pending(void) {
+    lanadb_flush_pending();
 }
 
 static void

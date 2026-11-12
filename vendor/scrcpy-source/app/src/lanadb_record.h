@@ -16,10 +16,15 @@
 struct sc_packet_sink *
 lanadb_record_sink(void);
 
-// Starts writing the video to `filename` from the next key frame (a fresh one
-// is requested from the device). Returns false if already recording.
+// The packet sink to attach to the audio demuxer (caches codec config and
+// forwards live audio while an audio-enabled recording is active).
+struct sc_packet_sink *
+lanadb_record_audio_sink(void);
+
+// Starts writing the video (and live audio when `audio` is true and available)
+// to `filename` from the next key frame. Returns false if already recording.
 bool
-lanadb_record_start(const char *filename, int format);
+lanadb_record_start(const char *filename, int format, bool audio);
 
 // Stops and finalizes the file; blocks until it is written. Returns whether a
 // complete file was written.

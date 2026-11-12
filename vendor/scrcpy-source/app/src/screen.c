@@ -843,6 +843,9 @@ error_destroy_frame_buffer:
     sc_frame_buffer_destroy(&screen->fb);
 error_destroy_mutex:
     sc_mutex_destroy(&screen->mutex);
+    if (lanadb_screen == screen) {
+        lanadb_screen = NULL;
+    }
 
     return false;
 }
@@ -919,6 +922,9 @@ sc_screen_destroy(struct sc_screen *screen) {
 #ifndef NDEBUG
     assert(!screen->open);
 #endif
+    if (lanadb_screen == screen) {
+        lanadb_screen = NULL;
+    }
     if (screen->disconnect_started) {
         sc_disconnect_destroy(&screen->disconnect);
     }

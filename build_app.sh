@@ -86,6 +86,7 @@ mirror="$app/Contents/Helpers/LANADBMirror.app"
 /bin/cp native/MirrorInfo.plist "$mirror/Contents/Info.plist"
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$mirror/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$mirror/Contents/Info.plist"
 fi
 /bin/cp build/custom-scrcpy/app/scrcpy "$mirror/Contents/MacOS/scrcpy"
 /opt/homebrew/bin/dylibbundler -od -b -x "$mirror/Contents/MacOS/scrcpy" \

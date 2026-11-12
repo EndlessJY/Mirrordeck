@@ -34,7 +34,10 @@ TCPIP_RETRY_SECONDS = 30 * 60
 TCPIP_LOOP_GUARD_SECONDS = 2 * 60
 ADB_PORT = 5037
 SCAN_PORTS = (5555, 5557, 16416)
-IGNORED_INTERFACES = ("lo", "utun", "awdl", "llw", "bridge", "vmenet")
+IGNORED_INTERFACES = (
+    "lo", "utun", "awdl", "llw", "bridge", "vmenet",
+    "ipsec", "ppp", "tun", "tap", "gif", "stf",
+)
 SHARED_ADDRESS_SPACE = ipaddress.IPv4Network("100.64.0.0/10")
 USB_WIFI_NETWORKS = tuple(ipaddress.IPv4Network(network) for network in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
@@ -54,7 +57,11 @@ def run_command(args: list[str], timeout: float = 8) -> tuple[int, str]:
         completed = subprocess.run(
             args, capture_output=True, text=True, errors="replace", timeout=timeout, env=env
         )
-        return completed.returncode, (completed.stdout + completed.stderr).strip()
+        out = completed.stdout.strip()
+        err = completed.stderr.strip()
+        if completed.returncode == 0 and out:
+            return 0, out
+        return completed.returncode, "\n".join(part for part in (out, err) if part)
     except subprocess.TimeoutExpired:
         return 124, f"操作超过 {timeout:g} 秒"
     except OSError as exc:
@@ -62,7 +69,7 @@ def run_command(args: list[str], timeout: float = 8) -> tuple[int, str]:
 
 
 def _scrcpy_commands() -> list[str]:
-    _status, output = run_command(["/bin/ps", "-axo", "command="], timeout=3)
+    _status, output = run_command(["/bin/ps", "-axww", "-o", "command="], timeout=3)
     return [line for line in output.splitlines() if "/Contents/MacOS/scrcpy --serial=" in line]
 
 
@@ -99,7 +106,7 @@ def parse_devices(output: str) -> dict[str, dict]:
         # ADB briefly exposes unresolved TLS mDNS service names as offline
         # transports. They are discovery placeholders, not separate devices.
         if parts[1] != "device" and re.search(
-            r"\._adb-tls-(?:connect|pairing)\._tcp$", parts[0]
+            r"\._adb-tls-(?:connect|pairing)\._tcp\.?$", parts[0]
         ):
             continue
         found[parts[0]] = {
@@ -120,9 +127,9 @@ def parse_mdns(output: str) -> list[dict]:
         if len(parts) < 3:
             continue
         endpoint = parts[-1]
-        if not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}", endpoint):
+        if not endpoint_parts(endpoint):
             continue
-        service = next((p for p in parts if p.startswith("_adb")), "")
+        service = next((p.rstrip(".") for p in parts if p.startswith("_adb")), "")
         if service:
             services.append({"name": parts[0], "service": service, "endpoint": endpoint})
     return services
@@ -146,8 +153,11 @@ def parse_interfaces(output: str, *, for_scan: bool = False
         ip = ipaddress.IPv4Address(match.group(1))
         if not (ip.is_private or ip in SHARED_ADDRESS_SPACE) or ip.is_loopback or ip.is_link_local:
             continue
-        mask = str(ipaddress.IPv4Address(int(match.group(2), 16)))
-        network = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+        try:
+            mask = str(ipaddress.IPv4Address(int(match.group(2), 16)))
+            network = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+        except ValueError:
+            continue
         if for_scan and network.num_addresses > 256:
             network = ipaddress.IPv4Network(f"{ip}/24", strict=False)
             notes.append(f"{interface} 网段较大，本次仅扫描本机所在的 {network}")
@@ -161,14 +171,14 @@ def parse_emulator_listeners(output: str) -> dict[str, int]:
     for line in output.splitlines():
         fields = line.split()
         process = fields[0] if fields else ""
-        if not re.search(r"mumu|emulator|qemu|nox|bluestack|genymo|ldplayer", process, re.I):
+        if not re.search(r"mumu|emulator|qemu|nox|bluestack|hd-player|genymo|ldplayer", process, re.I):
             continue
         match = re.search(r"TCP\s+\S+:(\d+)\s+\(LISTEN\)", line)
         if not match or len(fields) < 2 or not fields[1].isdigit():
             continue
         port = int(match.group(1))
         if (
-            port in {5555, 16416, 62001, 62025}
+            port in {5555, 7555, 16384, 16416, 62001, 62025}
             or (5555 <= port <= 5585 and port % 2 == 1)
         ):
             listeners[f"127.0.0.1:{port}"] = int(fields[1])
@@ -276,22 +286,22 @@ def market_name(props: dict[str, str]) -> str:
 INFO_SEPARATOR = "__LANADB_INFO__"
 # Properties that do not change while the device runs; cached by the app.
 STATIC_INFO_COMMANDS = {
-    "getprop": "getprop",
-    "screen": "wm size; wm density",
-    "device_name": "settings get global device_name",
-    "kernel": "uname -r",
-    "cpu_possible": "cat /sys/devices/system/cpu/possible",
+    "getprop": "getprop 2>/dev/null",
+    "screen": "wm size 2>/dev/null; wm density 2>/dev/null",
+    "device_name": "settings get global device_name 2>/dev/null",
+    "kernel": "uname -r 2>/dev/null",
+    "cpu_possible": "cat /sys/devices/system/cpu/possible 2>/dev/null",
     "cpu_freq": "cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null",
 }
 # Battery, memory, storage, uptime and addresses change; read on each visit.
 DYNAMIC_INFO_COMMANDS = {
-    "meminfo": "cat /proc/meminfo",
-    "df": "df -k /data",
-    "battery": "dumpsys battery",
-    "uptime": "cat /proc/uptime",
-    "ip_addr": "ip -o -4 addr show",
-    "display": "dumpsys display | grep -oE 'renderFrameRate [0-9.]+|fps=[0-9.]+'",
-    "public_ip": "curl -s -m 3 https://api.ipify.org 2>/dev/null",
+    "meminfo": "cat /proc/meminfo 2>/dev/null",
+    "df": "df -k /data 2>/dev/null",
+    "battery": "dumpsys battery 2>/dev/null",
+    "uptime": "cat /proc/uptime 2>/dev/null",
+    "ip_addr": "ip -o -4 addr show 2>/dev/null",
+    "display": "dumpsys display 2>/dev/null | grep -oE 'renderFrameRate [0-9.]+|fps=[0-9.]+'",
+    "characteristics": "getprop ro.build.characteristics 2>/dev/null",
 }
 INFO_COMMANDS = {**STATIC_INFO_COMMANDS, **DYNAMIC_INFO_COMMANDS}
 
@@ -484,7 +494,8 @@ def parse_device_info(parts: dict[str, str] | str) -> list[dict]:
     temperature = bat.get("temperature", "")
     voltage = bat.get("voltage", "")
     # TVs report a placeholder battery.
-    is_tv = "tv" in prop("ro.build.characteristics").split(",")
+    characteristics = prop("ro.build.characteristics") or get("characteristics").strip()
+    is_tv = "tv" in characteristics.split(",")
     section("电池", [] if is_tv else [
         ("电量", f"{bat['level']}%" if bat.get("level", "").isdigit() else ""),
         ("状态", BATTERY_STATUS.get(bat.get("status", ""), "")),
@@ -658,21 +669,31 @@ class AdbLan:
 
     def _device_prop(self, serial: str, prop: str) -> str:
         status, output = self.command("-s", serial, "shell", "getprop", prop, timeout=3)
-        return output.strip() if status == 0 else ""
+        if status != 0:
+            return ""
+        lines = [
+            line.strip() for line in output.splitlines()
+            if line.strip() and not line.lstrip().startswith("* ")
+        ]
+        return lines[-1] if lines else ""
 
     def _wifi_ips(self, serial: str) -> list[str]:
         status, output = self.command("-s", serial, "shell", "ip", "-o", "-4", "addr", "show", timeout=4)
         if status != 0:
             return []
-        ips = []
+        local_ips: list[str] = []
+        routed_ips: list[str] = []
         for interface, ip in re.findall(
             r"^\d+:\s+(\S+)\s+.*?\binet (\d+\.\d+\.\d+\.\d+)/\d+", output, re.M
         ):
+            if ip == "127.0.0.1" or ip in local_ips or ip in routed_ips:
+                continue
             interface = interface.split("@", 1)[0].split(":", 1)[0]
-            routed_wifi = bool(re.fullmatch(r"(?:wlan|wifi)\d+", interface)) and usb_wireless_endpoint(f"{ip}:5555")
-            if ip != "127.0.0.1" and (same_lan(ip, self.networks) or routed_wifi) and ip not in ips:
-                ips.append(ip)
-        return ips
+            if same_lan(ip, self.networks):
+                local_ips.append(ip)
+            elif bool(re.fullmatch(r"(?:wlan|wifi)\d+", interface)) and usb_wireless_endpoint(f"{ip}:5555"):
+                routed_ips.append(ip)
+        return local_ips + routed_ips
 
     def _identity(self, serial: str, props: dict[str, str] | None = None) -> str:
         if serial.startswith("emulator-"):
@@ -690,10 +711,12 @@ class AdbLan:
             )
             if status == 0 and re.fullmatch(r"[0-9a-fA-F]{8,32}", android_id):
                 return "emulator:" + android_id.lower()
-        identity = (
-            props.get("ro.serialno", "") if props is not None
-            else self._device_prop(serial, "ro.serialno")
-        )
+        if props is not None:
+            identity = props.get("ro.serialno", "").strip()
+            if not identity or identity.lower() == "unknown":
+                identity = props.get("ro.boot.serialno", "").strip()
+        else:
+            identity = self._device_prop(serial, "ro.serialno")
         return identity if identity and identity.lower() != "unknown" else serial
 
     def _connect(self, endpoint: str, attempts: int = 2, timeout: float = 3) -> str:
@@ -764,17 +787,6 @@ class AdbLan:
         if status != 0 and INFO_SEPARATOR not in output and len(keys) > 1:
             raise ValueError(explain_failure(output) if output else "无法读取设备信息")
         parts = split_info_output(output, keys)
-        if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", parts.get("public_ip", "").strip()):
-            # Emulators and phones without curl share the Mac's connection
-            # when they sit on its network.
-            lan = re.findall(r"^\d+:\s+(?:wlan|eth)\S*\s+inet (\d+\.\d+\.\d+\.\d+)",
-                             parts.get("ip_addr", ""), re.M)
-            if not self.networks:
-                _code, ifconfig = run_command(["/sbin/ifconfig"], timeout=5)
-                self.networks, _notes = parse_interfaces(ifconfig)
-            local = serial.startswith(("127.0.0.1:", "emulator-"))
-            if local or any(same_lan(ip, self.networks) for ip in lan):
-                parts["public_ip"] = host_public_ip()
         return {"sections": parse_device_info(parts), "scope": scope}
 
     def _start_server(self) -> None:
@@ -795,10 +807,10 @@ class AdbLan:
     def _wifi_ips_settled(self, serial: str, wait: bool) -> list[str]:
         """A device that has just connected may not report its address yet."""
         ips = self._wifi_ips(serial)
-        for _ in range(4 if wait else 0):
+        for _ in range(2 if wait else 0):
             if ips:
                 break
-            time.sleep(0.75)
+            time.sleep(0.4)
             ips = self._wifi_ips(serial)
         return ips
 
@@ -890,9 +902,16 @@ class AdbLan:
                             add(endpoint, "USB 已授权")
                     continue
                 endpoint = f"{ips[0]}:5555"
+                port_ready = port_open_stable(endpoint)
+                if not port_ready and len(ips) > 1:
+                    for alt_ip in ips[1:]:
+                        alt_ep = f"{alt_ip}:5555"
+                        if port_open_stable(alt_ep):
+                            endpoint = alt_ep
+                            port_ready = True
+                            break
                 if item.get("usb"):
                     expected_usb[endpoint] = identity
-                port_ready = port_open_stable(endpoint)
                 if port_ready and known.get(endpoint) == identity:
                     add(endpoint, "USB 已授权")
                     continue
@@ -913,11 +932,11 @@ class AdbLan:
                     _code, output = self.command("-s", serial, "tcpip", "5555", timeout=7)
                     opened = False
                     if "restarting in TCP mode" in output or port_open_stable(endpoint):
-                        for _ in range(12):
-                            if port_open_stable(endpoint, attempts=2):
+                        for _ in range(8):
+                            if port_open_stable(endpoint, attempts=1):
                                 opened = True
                                 break
-                            time.sleep(0.3)
+                            time.sleep(0.25)
                     tcpip_attempts[identity] = {"at": time.time(), "ok": opened}
                     tcpip_changed = True
                     if not opened:
@@ -936,8 +955,7 @@ class AdbLan:
                 if before.get(endpoint, {}).get("state") == "device":
                     return "已连接"
                 is_emulator_listener = "本机模拟器" in candidates[endpoint]
-                is_known = "上次成功" in candidates[endpoint]
-                if not port_open_stable(endpoint, attempts=2) and not (is_emulator_listener or is_known):
+                if not port_open_stable(endpoint, attempts=2) and not is_emulator_listener:
                     return "端口未开放或已变化"
                 return self._connect(
                     endpoint, attempts=1 if is_emulator_listener else 2,
@@ -977,7 +995,14 @@ class AdbLan:
 
             identity_rejections = set()
             for endpoint, expected in expected_usb.items():
-                if after.get(endpoint, {}).get("state") != "device":
+                state = after.get(endpoint, {}).get("state", "")
+                if state == "unauthorized":
+                    self.command("disconnect", endpoint, timeout=3)
+                    after.pop(endpoint, None)
+                    verified.pop(endpoint, None)
+                    known.pop(endpoint, None)
+                    continue
+                if state != "device":
                     continue
                 match = self._verify_usb_identity(endpoint, expected)
                 if match:
@@ -1020,14 +1045,22 @@ class AdbLan:
                     group["wireless"] |= kind == "无线" and not detail["emulator"]
                     if endpoint_parts(serial):
                         known[serial] = identity
-                else:
+                elif serial not in candidates:
                     usb_issues.append({
                         "serial": serial, "state": item["state"],
                         "kind": "模拟器" if serial.startswith("emulator-") else "ADB",
                     })
+            wireless_connected_serials = {
+                transport["endpoint"]
+                for group in devices.values()
+                if group.get("wireless")
+                for transport in group["transports"]
+            } | {
+                identity for identity, group in devices.items() if group.get("wireless")
+            }
             usb_issues_by_serial = {
                 issue["serial"]: issue for issue in usb_issues
-                if not devices.get(issue["serial"], {}).get("wireless")
+                if issue["serial"] not in wireless_connected_serials
             }
             usb_issues = list(usb_issues_by_serial.values())
             # Android's encrypted wireless-debugging port changes after restarts.
@@ -1228,14 +1261,18 @@ class AdbLan:
                             and port_open_stable(retry_endpoint, attempts=2)
                         ):
                             retry_output = self._connect(retry_endpoint, attempts=1)
-                            if (
-                                retry_endpoint in verified
-                                and "connected to" in retry_output.lower()
-                                and self._verify_usb_identity(retry_endpoint, verified[retry_endpoint]) is False
-                            ):
-                                self.last_reconnect.append(f"{retry_endpoint}: 设备身份与 USB 授权记录不符")
-                                known.pop(retry_endpoint, None)
-                                verified.pop(retry_endpoint)
+                            if "connected to" in retry_output.lower():
+                                if retry_endpoint in verified:
+                                    if self._verify_usb_identity(retry_endpoint, verified[retry_endpoint]) is False:
+                                        self.last_reconnect.append(f"{retry_endpoint}: 设备身份与 USB 授权记录不符")
+                                        known.pop(retry_endpoint, None)
+                                        verified.pop(retry_endpoint)
+                                else:
+                                    retry_expected = known.get(retry_endpoint, "")
+                                    retry_actual = self._identity(retry_endpoint)
+                                    if retry_expected and retry_actual not in {retry_expected, retry_endpoint}:
+                                        self.last_reconnect.append(f"{retry_endpoint}: 设备 ID 与缓存不符")
+                                        self.command("disconnect", retry_endpoint, timeout=3)
                     changed = True
                     break
             kept = {

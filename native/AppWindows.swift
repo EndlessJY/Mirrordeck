@@ -90,10 +90,13 @@ final class AppWindowStore: ObservableObject {
         UserDefaults.standard.set(list, forKey: Self.recentKey(device.identity))
     }
     private var processes: [String: Process] = [:]
+    private var starting = Set<String>()
     private var iconData: [String: [String: Data]] = [:]
     private var watchers: [String: DispatchSourceTimer] = [:]
     /// Windows this app closed itself (the app left its display, or quitting).
     private var closing = Set<String>()
+
+    var hasActiveWork: Bool { !processes.isEmpty || !starting.isEmpty }
 
     private var tools: URL? {
         Bundle.main.resourceURL?.appendingPathComponent("Tools", isDirectory: true)
@@ -120,18 +123,32 @@ final class AppWindowStore: ObservableObject {
 
     private static func run(_ executable: URL, _ arguments: [String],
                             environment: [String: String]? = nil,
-                            directory: URL? = nil) -> String {
+                            directory: URL? = nil,
+                            timeout: TimeInterval = 12) -> String {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         if let environment { process.environment = environment }
         if let directory { process.currentDirectoryURL = directory }
         let pipe = Pipe()
+        let reader = pipe.fileHandleForReading
         process.standardOutput = pipe
         process.standardError = pipe
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
         guard (try? process.run()) != nil else { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        var data = Data()
+        let readDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            data = reader.readDataToEndOfFile()
+            readDone.signal()
+        }
+        if finished.wait(timeout: .now() + timeout) == .timedOut {
+            if process.isRunning { process.terminate() }
+            try? reader.close()
+            return ""
+        }
+        _ = readDone.wait(timeout: .now() + 2)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -142,19 +159,24 @@ final class AppWindowStore: ObservableObject {
         guard !device.isApple, !loading.contains(id), reload || apps[id] == nil,
               let serial = MirrorStore.preferredTransports(for: device).first?.endpoint,
               let tools else { return }
-        let executable: URL
-        do {
-            executable = try MirrorStore.shared.mirrorExecutable(for: device)
-        } catch {
-            errors[id] = "无法准备投屏程序：\(error.localizedDescription)"
-            return
-        }
+        let preserveRunning = MirrorStore.shared.hasRunningSession(for: device)
         loading.insert(id)
         errors[id] = nil
         let environment = environment(serial: serial, tools: tools)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let executable: URL
+            do {
+                executable = try MirrorStore.shared.mirrorExecutable(
+                    for: device, preserveRunningBundle: preserveRunning)
+            } catch {
+                DispatchQueue.main.async {
+                    self?.loading.remove(id)
+                    self?.errors[id] = "无法准备投屏程序：\(error.localizedDescription)"
+                }
+                return
+            }
             let output = Self.run(executable, ["--serial=\(serial)", "--list-apps"],
-                                  environment: environment, directory: tools)
+                                  environment: environment, directory: tools, timeout: 15)
             let parsed = Self.parseApps(output)
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -192,10 +214,10 @@ final class AppWindowStore: ObservableObject {
               let dex = Bundle.main.resourceURL?.appendingPathComponent("lanadb-icons.dex"),
               FileManager.default.fileExists(atPath: dex.path) else { return [:] }
         let remote = "/data/local/tmp/lanadb-icons-\(UUID().uuidString.prefix(8)).dex"
-        _ = run(adb, ["-s", serial, "push", dex.path, remote])
+        _ = run(adb, ["-s", serial, "push", dex.path, remote], timeout: 15)
         let output = run(adb, ["-s", serial, "shell",
                                "CLASSPATH=\(remote) app_process / IconDump 96 " +
-                               packages.joined(separator: " ") + "; rm -f \(remote)"])
+                               packages.joined(separator: " ") + "; rm -f \(remote)"], timeout: 25)
         var result: [String: Data] = [:]
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 1)
@@ -241,19 +263,47 @@ final class AppWindowStore: ObservableObject {
                 .activate(options: [.activateAllWindows])
             return
         }
+        guard !starting.contains(key) else { return }
         guard let transport = MirrorStore.preferredTransports(for: device).first, let tools else {
             errors[id] = "设备未连接。"
             return
         }
-        let executable: URL
-        do {
-            executable = try MirrorStore.shared.mirrorExecutable(for: device)
-        } catch {
-            errors[id] = "无法准备投屏程序：\(error.localizedDescription)"
-            return
-        }
         remember(app.package, on: device)
+        starting.insert(key)
+        open[id, default: []].insert(app.package)
+        errors[id] = nil
+        let preserveRunning = MirrorStore.shared.hasRunningSession(for: device)
+        let adb = tools.appendingPathComponent("adb")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let preparedResult = Result { try MirrorStore.shared.mirrorExecutable(
+                for: device, preserveRunningBundle: preserveRunning) }
+            let before = Set(Self.displays(in: Self.run(adb, ["-s", transport.endpoint, "shell",
+                Self.activitiesCommand], timeout: 6)))
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard self.starting.remove(key) != nil else { return }
+                let executable: URL
+                switch preparedResult {
+                case .success(let exec):
+                    executable = exec
+                case .failure(let error):
+                    self.open[id]?.remove(app.package)
+                    self.errors[id] = "无法准备投屏程序：\(error.localizedDescription)"
+                    return
+                }
+                self.launchWindow(for: app, on: device, transport: transport, options: options,
+                                  tools: tools, executable: executable, existingDisplays: before)
+            }
+        }
+    }
+
+    private func launchWindow(for app: DeviceApp, on device: ADBDevice, transport: ADBTransport,
+                              options: MirrorOptions, tools: URL, executable: URL,
+                              existingDisplays: Set<Int>) {
+        let id = device.identity
+        let key = key(device, app.package)
         let title = "\(app.label) · \(device.title)"
+        let effectiveCodec = MirrorStore.effectiveCodec(options.videoCodec, for: device)
         let process = Process()
         process.executableURL = executable
         process.currentDirectoryURL = tools
@@ -268,11 +318,12 @@ final class AppWindowStore: ObservableObject {
             "--max-fps=\(options.maxFPS)",
             "--video-bit-rate=\(options.videoBitrateMbps)M",
             "--audio-bit-rate=\(options.audioBitrateKbps)K",
-            "--video-codec=\(MirrorStore.effectiveCodec(options.videoCodec, for: device))",
+            "--video-codec=\(effectiveCodec)",
             "--prefer-text",
         ]
         if options.maxSize > 0 { arguments.append("--max-size=\(options.maxSize)") }
-        if !options.audio { arguments.append("--no-audio") }
+        // AAC allows single-app MP4 recordings to mux live audio playable in chat apps.
+        arguments.append(options.audio ? "--audio-codec=aac" : "--no-audio")
         process.arguments = arguments
         let token = UUID().uuidString
         var environment = environment(serial: transport.endpoint, tools: tools)
@@ -291,6 +342,7 @@ final class AppWindowStore: ObservableObject {
             .appendingPathComponent("lan-adb-scrcpy-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: logURL.path, contents: nil),
               let logHandle = try? FileHandle(forWritingTo: logURL) else {
+            open[id]?.remove(app.package)
             errors[id] = "无法打开应用窗口。"
             return
         }
@@ -309,7 +361,16 @@ final class AppWindowStore: ObservableObject {
                 self.watchers.removeValue(forKey: key)?.cancel()
                 self.open[id]?.remove(app.package)
                 MirrorStore.shared.unregisterAppWindow(key: key)
-                if self.closing.remove(key) == nil,
+                let wasClosing = self.closing.remove(key) != nil
+                if !wasClosing, effectiveCodec == "h265",
+                   MirrorStore.isVideoEncoderFailure(text) {
+                    UserDefaults.standard.set(false, forKey: MirrorStore.hevcKey(device))
+                    var fallbackOptions = options
+                    fallbackOptions.videoCodec = "h264"
+                    self.openWindow(for: app, on: device, options: fallbackOptions)
+                    return
+                }
+                if !wasClosing,
                    finished.terminationStatus != 0, finished.terminationReason == .exit {
                     self.errors[id] = Self.failureMessage(text, app: app)
                 }
@@ -318,36 +379,32 @@ final class AppWindowStore: ObservableObject {
         // The window activates itself once it is up.
         NSApp.yieldActivation(toApplicationWithBundleIdentifier:
             MirrorStore.bundleIdentifier(for: device))
-        open[id, default: []].insert(app.package)
-        errors[id] = nil
-        let adb = tools.appendingPathComponent("adb")
-        // The displays that exist now; the window's own is the new one.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let before = Set(Self.displays(in: Self.run(adb, ["-s", transport.endpoint, "shell",
-                Self.activitiesCommand])))
-            DispatchQueue.main.async {
-                guard let self else { return }
-                do {
-                    try process.run()
-                    self.processes[key] = process
-                    MirrorStore.shared.registerAppWindow(key: key, device: device,
-                                                         transport: transport, process: process,
-                                                         token: token, options: options,
-                                                         title: title)
-                    self.watchForExit(key: key, process: process, serial: transport.endpoint,
-                                      existing: before, package: app.package, token: token)
-                } catch {
-                    logHandle.closeFile()
-                    try? FileManager.default.removeItem(at: logURL)
-                    self.open[id]?.remove(app.package)
-                    self.errors[id] = "无法打开应用窗口：\(error.localizedDescription)"
-                }
+        do {
+            try process.run()
+            processes[key] = process
+            MirrorStore.shared.registerAppWindow(key: key, device: device,
+                                                 transport: transport, process: process,
+                                                 token: token, options: options,
+                                                 title: title)
+            watchForExit(key: key, process: process, serial: transport.endpoint,
+                         existing: existingDisplays, package: app.package, token: token)
+        } catch {
+            logHandle.closeFile()
+            try? FileManager.default.removeItem(at: logURL)
+            if let icon = environment["LANADB_APP_ICON"] {
+                try? FileManager.default.removeItem(atPath: icon)
             }
+            open[id]?.remove(app.package)
+            errors[id] = "无法打开应用窗口：\(error.localizedDescription)"
         }
     }
 
     private static let activitiesCommand =
-        "dumpsys activity activities | grep -E '^Display #|Hist  #'"
+        "dumpsys activity activities | grep -E '^Display #|Hist +#'"
+
+    private static func isActivityEntry(_ text: String) -> Bool {
+        text.range(of: #"Hist +#[0-9]+:"#, options: .regularExpression) != nil
+    }
 
     static func displays(in output: String) -> [Int] {
         output.split(separator: "\n").compactMap { line in
@@ -369,7 +426,7 @@ final class AppWindowStore: ObservableObject {
         timer.schedule(deadline: .now() + 0.8, repeating: 0.8)
         timer.setEventHandler { [weak self] in
             guard process.isRunning else { timer.cancel(); return }
-            let output = Self.run(adb, ["-s", serial, "shell", Self.activitiesCommand])
+            let output = Self.run(adb, ["-s", serial, "shell", Self.activitiesCommand], timeout: 5)
             if display == nil {
                 // The new display that shows this app.
                 display = Self.displays(in: output).first { candidate in
@@ -415,7 +472,7 @@ final class AppWindowStore: ObservableObject {
                 inDisplay = text.hasPrefix("Display #\(display) ") || text == "Display #\(display)"
                 continue
             }
-            if inDisplay && text.contains("Hist  #") && !text.contains(" f}") {
+            if inDisplay && isActivityEntry(text) && !text.contains(" f}") {
                 return text
             }
         }
@@ -433,7 +490,7 @@ final class AppWindowStore: ObservableObject {
                 inDisplay = text.hasPrefix("Display #\(display) ") || text == "Display #\(display)"
                 continue
             }
-            if inDisplay && text.contains("Hist  #") && !text.contains(" f}")
+            if inDisplay && isActivityEntry(text) && !text.contains(" f}")
                 && text.contains(package + "/") {
                 count += 1
             }
@@ -455,6 +512,13 @@ final class AppWindowStore: ObservableObject {
     }
 
     func closeAll(deviceID: String? = nil) {
+        if let deviceID {
+            starting = starting.filter { !$0.hasPrefix(deviceID + "|") }
+            open[deviceID] = nil
+        } else {
+            starting.removeAll()
+            open.removeAll()
+        }
         for (key, process) in processes where deviceID == nil || key.hasPrefix(deviceID! + "|") {
             closing.insert(key)
             if process.isRunning { process.terminate() }

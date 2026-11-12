@@ -31,7 +31,7 @@ public final class IconDump {
 
     private static Drawable rawIcon(PackageManager manager, String name) throws Exception {
         ApplicationInfo app = manager.getApplicationInfo(name, 0);
-        int resource = app.icon;
+        int resource = app.icon != 0 ? app.icon : app.roundIcon;
         Intent launch = manager.getLaunchIntentForPackage(name);
         ComponentName component = launch != null ? launch.getComponent() : null;
         if (component != null) {
@@ -67,12 +67,17 @@ public final class IconDump {
         for (int index = 1; index < args.length; index++) {
             String name = args[index];
             try {
-                Drawable icon;
+                Drawable icon = null;
                 try {
                     icon = launcherIcon(manager, name);
-                } catch (Throwable themed) {
-                    // The vendor theme failed: the app's own icon resource.
+                } catch (Throwable ignored) {
+                    // fall back to the app's own icon resource below
+                }
+                if (icon == null) {
                     icon = rawIcon(manager, name);
+                }
+                if (icon == null) {
+                    throw new IllegalStateException("no icon");
                 }
                 Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
                 icon.setBounds(0, 0, size, size);

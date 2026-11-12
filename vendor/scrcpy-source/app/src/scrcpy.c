@@ -899,6 +899,14 @@ aoa_complete:
 
         sc_packet_source_add_sink(&s->audio_demuxer.packet_source,
                                   &s->audio_decoder.packet_sink);
+        const char *app_window = getenv("LANADB_APP_WINDOW");
+        if (app_window && !strcmp(app_window, "1") && !options->record_filename) {
+            struct sc_packet_sink *audio_record_sink = lanadb_record_audio_sink();
+            if (audio_record_sink) {
+                sc_packet_source_add_sink(&s->audio_demuxer.packet_source,
+                                          audio_record_sink);
+            }
+        }
 
         if (!sc_decoder_start(&s->audio_decoder)) {
             goto end;
@@ -1089,6 +1097,7 @@ end:
     if (recorder_initialized) {
         sc_recorder_stop(&s->recorder);
     }
+    lanadb_record_stop();
     if (screen_initialized) {
         sc_screen_interrupt(&s->screen);
     }

@@ -22,6 +22,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 安装构建依赖
         env:
@@ -63,10 +65,18 @@ jobs:
           # Each push to main is a new version; earlier versions stay listed.
           # The old single "最新构建" release is no longer used.
           gh release delete latest-build --yes --cleanup-tag 2>/dev/null || true
+          prev_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+          notes=""
+          if [[ -n "$prev_tag" ]]; then
+            notes=$(git log --no-merges --format='- %s' "${prev_tag}..HEAD" | grep -iv '^co-authored-by:' || true)
+          fi
+          if [[ -z "$notes" ]]; then
+            notes=$(git log -1 --format=%B "$GITHUB_SHA" | grep -iv '^co-authored-by:' || true)
+          fi
           {
             echo "## 本次更新"
             echo
-            git log -1 --format=%B "$GITHUB_SHA" | grep -iv '^co-authored-by:' || true
+            echo "$notes"
             echo
             echo "适用于 Apple 芯片 Mac，需要 macOS ${minimum} 或更新版本。应用未经 Apple 公证，首次打开请在“系统设置 › 隐私与安全性”中选择“仍要打开”。"
           } > release-notes.md

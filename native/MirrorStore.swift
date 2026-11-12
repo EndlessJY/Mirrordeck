@@ -67,14 +67,45 @@ final class MirrorStore: ObservableObject {
     private var appRecordings: [String: AppRecording] = [:]
     private var actionObserver: NSObjectProtocol?
 
-    func mirrorExecutable(for device: ADBDevice) throws -> URL {
+    private static let bundlePrepLock = NSLock()
+    private static let cachedBinaryVersion: String? = {
+        let sourceBinary = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/LANADBMirror.app/Contents/MacOS/scrcpy")
+        guard let binary = try? Data(contentsOf: sourceBinary) else { return nil }
+        return SHA256.hash(data: binary).prefix(5)
+            .map { String(format: "%02x", Int($0)) }.joined()
+    }()
+
+    private static func storageIdentity(for device: ADBDevice) -> String {
+        device.identity.hasPrefix("emulator-process:") ? "emulator-local" : device.identity
+    }
+
+    func hasRunningSession(for device: ADBDevice) -> Bool {
+        let id = device.identity
+        if processes[id]?.isRunning == true || recordingProcesses[id]?.isRunning == true {
+            return true
+        }
+        let prefix = id + "|"
+        return processes.contains { $0.key.hasPrefix(prefix) && $0.value.isRunning }
+    }
+
+    func mirrorExecutable(for device: ADBDevice, preserveRunningBundle: Bool = false) throws -> URL {
+        Self.bundlePrepLock.lock()
+        defer { Self.bundlePrepLock.unlock() }
+
         let source = Bundle.main.bundleURL.appendingPathComponent(
             "Contents/Helpers/LANADBMirror.app", isDirectory: true)
         let sourceBinary = source.appendingPathComponent("Contents/MacOS/scrcpy")
-        let binary = try Data(contentsOf: sourceBinary)
-        let version = SHA256.hash(data: binary).prefix(5)
-            .map { String(format: "%02x", Int($0)) }.joined()
-        let identity = SHA256.hash(data: Data(device.identity.utf8)).prefix(8)
+        let version: String
+        if let cached = Self.cachedBinaryVersion {
+            version = cached
+        } else {
+            let binary = try Data(contentsOf: sourceBinary)
+            version = SHA256.hash(data: binary).prefix(5)
+                .map { String(format: "%02x", Int($0)) }.joined()
+        }
+        let keyIdentity = Self.storageIdentity(for: device)
+        let identity = SHA256.hash(data: Data(keyIdentity.utf8)).prefix(8)
             .map { String(format: "%02x", Int($0)) }.joined()
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/LAN ADB Manager/Mirrors",
@@ -88,9 +119,22 @@ final class MirrorStore: ObservableObject {
         Self.removeStaleMirrors(in: directory, keeping: container, version: version)
         if FileManager.default.isExecutableFile(atPath: executable.path) { return executable }
 
+        // While a window for this device is already running, reuse its existing
+        // bundle instead of deleting the running .app if the device was renamed.
+        if preserveRunningBundle,
+           let entries = try? FileManager.default.contentsOfDirectory(
+               at: container, includingPropertiesForKeys: nil),
+           let runningApp = entries.first(where: { $0.pathExtension == "app" }) {
+            let existing = runningApp.appendingPathComponent("Contents/MacOS/scrcpy")
+            if FileManager.default.isExecutableFile(atPath: existing.path) {
+                return existing
+            }
+        }
+
         try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
-        if let leftovers = try? FileManager.default.contentsOfDirectory(
-            at: container, includingPropertiesForKeys: nil) {
+        if !preserveRunningBundle,
+           let leftovers = try? FileManager.default.contentsOfDirectory(
+               at: container, includingPropertiesForKeys: nil) {
             // A renamed device leaves its previous bundle here.
             leftovers.forEach { try? FileManager.default.removeItem(at: $0) }
         }
@@ -125,7 +169,8 @@ final class MirrorStore: ObservableObject {
     }
 
     static func bundleIdentifier(for device: ADBDevice) -> String {
-        let identity = SHA256.hash(data: Data(device.identity.utf8)).prefix(8)
+        let keyIdentity = storageIdentity(for: device)
+        let identity = SHA256.hash(data: Data(keyIdentity.utf8)).prefix(8)
             .map { String(format: "%02x", Int($0)) }.joined()
         return "uk.agpt.lanadbmanager.mirror.\(identity)"
     }
@@ -152,6 +197,22 @@ final class MirrorStore: ObservableObject {
             if isLegacyBundle || isOldVersion {
                 try? FileManager.default.removeItem(at: entry)
             }
+        }
+    }
+
+    /// True when scrcpy output indicates the device's video encoder (not audio
+    /// or ADB transport) failed to initialize or encode H.265.
+    static func isVideoEncoderFailure(_ output: String) -> Bool {
+        output.split(separator: "\n").contains { raw in
+            let line = String(raw)
+            if line.localizedCaseInsensitiveContains("audio") { return false }
+            let isError = line.contains("ERROR") || line.contains("Exception")
+            guard isError else { return false }
+            return line.localizedCaseInsensitiveContains("encod")
+                || line.localizedCaseInsensitiveContains("mediacodec")
+                || line.localizedCaseInsensitiveContains("configureerror")
+                || line.localizedCaseInsensitiveContains("hevc")
+                || line.localizedCaseInsensitiveContains("h265")
         }
     }
 
@@ -232,7 +293,7 @@ final class MirrorStore: ObservableObject {
                 recordingStops.insert(id)
                 messages[id] = "正在结束录制并保存文件…"
                 if recorder.isRunning { recorder.terminate() }
-            } else if let options = sessionOptions[id] {
+            } else if let options = sessionOptions[id], !recordingPreparing.contains(id) {
                 startRecording(id: id, device: device, session: session,
                                options: options, kind: action)
             }
@@ -241,14 +302,17 @@ final class MirrorStore: ObservableObject {
         }
     }
 
+    private var recordingPreparing = Set<String>()
+
     private func notifyMirror(id: String, kind: String, success: Bool, message: String,
                               recording: Bool? = nil, path: String? = nil,
                               thumb: String? = nil, recordTo: String? = nil,
-                              copied: Bool = false) {
+                              recordAudio: Bool? = nil, copied: Bool = false) {
         guard let token = sessionTokens[id] else { return }
         var info: [String: Any] = ["token": token, "kind": kind,
                                    "success": success, "message": message]
         if let recordTo { info["recordTo"] = recordTo }
+        if let recordAudio { info["recordAudio"] = recordAudio }
         if copied { info["copied"] = true }
         if let recording { info["recording"] = recording }
         if let path { info["path"] = path }
@@ -271,23 +335,43 @@ final class MirrorStore: ObservableObject {
                          recording: false)
             return
         }
-        let url = isGIF ? FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).mp4") : destination
         guard let tools = Bundle.main.resourceURL?.appendingPathComponent("Tools", isDirectory: true) else {
             let message = "应用内的录屏组件缺失。"
             notifyMirror(id: id, kind: kind, success: false, message: message,
                          recording: false)
             return
         }
-        let scrcpy: URL
-        do {
-            scrcpy = try mirrorExecutable(for: device)
-        } catch {
-            let message = "无法准备设备专属投屏程序：\(error.localizedDescription)"
-            notifyMirror(id: id, kind: kind, success: false, message: message,
-                         recording: false)
-            return
+        let preserveRunning = hasRunningSession(for: device)
+        recordingPreparing.insert(id)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let preparedResult = Result { try MirrorStore.shared.mirrorExecutable(
+                for: device, preserveRunningBundle: preserveRunning) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.recordingPreparing.remove(id)
+                guard self.sessions[id] != nil, self.recordingProcesses[id] == nil else { return }
+                let scrcpy: URL
+                switch preparedResult {
+                case .success(let exec):
+                    scrcpy = exec
+                case .failure(let error):
+                    let message = "无法准备设备专属投屏程序：\(error.localizedDescription)"
+                    self.notifyMirror(id: id, kind: kind, success: false, message: message,
+                                      recording: false)
+                    return
+                }
+                self.launchRecorder(id: id, device: device, session: session, options: options,
+                                    kind: kind, isGIF: isGIF, destination: destination,
+                                    tools: tools, scrcpy: scrcpy)
+            }
         }
+    }
+
+    private func launchRecorder(id: String, device: ADBDevice, session: MirrorSession,
+                                options: MirrorOptions, kind: String, isGIF: Bool,
+                                destination: URL, tools: URL, scrcpy: URL) {
+        let url = isGIF ? FileManager.default.temporaryDirectory
+            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).mp4") : destination
         let adb = tools.appendingPathComponent("adb")
         let server = tools.appendingPathComponent("scrcpy-server")
         guard FileManager.default.isExecutableFile(atPath: scrcpy.path),
@@ -360,7 +444,8 @@ final class MirrorStore: ObservableObject {
                 let requested = self.recordingStops.remove(id) != nil
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 let success = requested && finished.terminationStatus == 0 && size > 0
-                if useHEVC && !requested && Date().timeIntervalSince(startedAt) < 8 {
+                if useHEVC && !requested && Date().timeIntervalSince(startedAt) < 8
+                    && Self.isVideoEncoderFailure(output) {
                     // No usable H.265 encoder: remember it and record in H.264.
                     UserDefaults.standard.set(false, forKey: Self.hevcKey(device))
                     try? FileManager.default.removeItem(at: url)
@@ -459,8 +544,19 @@ final class MirrorStore: ObservableObject {
         sessions.removeValue(forKey: key)
         appWindowTitles.removeValue(forKey: key)
         messages.removeValue(forKey: key)
-        if let recording = appRecordings.removeValue(forKey: key), recording.kind == "gif" {
-            try? FileManager.default.removeItem(at: recording.source)
+        if let recording = appRecordings.removeValue(forKey: key) {
+            let size = (try? recording.source.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if size > 0 {
+                if recording.kind == "gif" {
+                    convertAnimation(id: key, kind: recording.kind, source: recording.source,
+                                     destination: recording.destination)
+                } else {
+                    finishCapture(id: key, kind: recording.kind, destination: recording.destination,
+                                  error: nil)
+                }
+            } else if recording.kind == "gif" {
+                try? FileManager.default.removeItem(at: recording.source)
+            }
         }
     }
 
@@ -510,7 +606,7 @@ final class MirrorStore: ObservableObject {
                                          recording: true, ready: current.ready)
         }
         notifyMirror(id: id, kind: kind, success: true, message: "正在录制。", recording: true,
-                     recordTo: source.path)
+                     recordTo: source.path, recordAudio: !isGIF && RecordingSettings.recordsAudio)
     }
 
     private func finishCapture(id: String, kind: String, destination: URL, error: String?) {
@@ -533,6 +629,11 @@ final class MirrorStore: ObservableObject {
                                   recording: false, path: destination.path, thumb: thumb?.path,
                                   copied: copied)
                 if reveal { self.revealCapture(destination, deviceID: id) }
+                if let thumb, thumb != destination {
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8) {
+                        try? FileManager.default.removeItem(at: thumb)
+                    }
+                }
             }
         }
     }
@@ -620,34 +721,43 @@ final class MirrorStore: ObservableObject {
         startupRetries[id] = 0
         let token = UUID()
         startupTokens[id] = token
-        starting.insert(id)
         let fallback = transports.first { $0.type == "无线" && $0.endpoint != primary.endpoint }
-        // Android's encoder converts the screen to sRGB before encoding (checked
-        // against the device's own Display P3 screencap), so the mirror,
-        // recordings and GIFs are all treated as sRGB.
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.starting.remove(id)
-            guard self.startupTokens[id] == token, self.processes[id] == nil else { return }
-            self.launch(device: device, transport: primary, fallback: fallback,
-                        options: options)
-        }
+        launch(device: device, transport: primary, fallback: fallback, options: options)
     }
 
     private func launch(device: ADBDevice, transport: ADBTransport, fallback: ADBTransport?,
                         options: MirrorOptions) {
         let id = device.identity
         guard let tools = Bundle.main.resourceURL?.appendingPathComponent("Tools", isDirectory: true) else {
+            starting.remove(id)
             errors[id] = "应用缺少投屏组件，请重新安装。"
             return
         }
-        let scrcpy: URL
-        do {
-            scrcpy = try mirrorExecutable(for: device)
-        } catch {
-            errors[id] = "无法准备设备专属投屏程序：\(error.localizedDescription)"
-            return
+        let token = startupTokens[id] ?? UUID()
+        startupTokens[id] = token
+        starting.insert(id)
+        let preserveRunning = hasRunningSession(for: device)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let preparedResult = Result { try MirrorStore.shared.mirrorExecutable(
+                for: device, preserveRunningBundle: preserveRunning) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.starting.remove(id)
+                guard self.startupTokens[id] == token, self.processes[id] == nil else { return }
+                switch preparedResult {
+                case .success(let scrcpy):
+                    self.launchPrepared(device: device, transport: transport, fallback: fallback,
+                                        options: options, tools: tools, scrcpy: scrcpy)
+                case .failure(let error):
+                    self.errors[id] = "无法准备设备专属投屏程序：\(error.localizedDescription)"
+                }
+            }
         }
+    }
+
+    private func launchPrepared(device: ADBDevice, transport: ADBTransport, fallback: ADBTransport?,
+                                options: MirrorOptions, tools: URL, scrcpy: URL) {
+        let id = device.identity
         let adb = tools.appendingPathComponent("adb")
         let server = tools.appendingPathComponent("scrcpy-server")
         guard FileManager.default.isExecutableFile(atPath: scrcpy.path),
@@ -765,6 +875,13 @@ final class MirrorStore: ObservableObject {
             startupTokens.removeValue(forKey: id)
             return
         }
+        if options.videoCodec == "h265", Self.isVideoEncoderFailure(output) {
+            UserDefaults.standard.set(false, forKey: Self.hevcKey(device))
+            var fallbackOptions = options
+            fallbackOptions.videoCodec = "h264"
+            launch(device: device, transport: transport, fallback: fallback, options: fallbackOptions)
+            return
+        }
         if let fallback {
             launch(device: device, transport: fallback, fallback: nil,
                    options: options)
@@ -803,10 +920,7 @@ final class MirrorStore: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, self.processes[id] === process, process.isRunning else { return }
             let output = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
-            let failed = output.split(separator: "\n").contains { line in
-                line.contains("ERROR") && line.localizedCaseInsensitiveContains("encod")
-            }
-            if failed {
+            if Self.isVideoEncoderFailure(output) {
                 UserDefaults.standard.set(false, forKey: Self.hevcKey(device))
                 self.h264Relaunches.insert(id)
                 process.terminate()
@@ -820,6 +934,7 @@ final class MirrorStore: ObservableObject {
     func stop(deviceID: String) {
         startupTokens.removeValue(forKey: deviceID)
         starting.remove(deviceID)
+        recordingPreparing.remove(deviceID)
         if let recorder = recordingProcesses[deviceID] {
             recordingStops.insert(deviceID)
             if recorder.isRunning { recorder.terminate() }
@@ -831,13 +946,20 @@ final class MirrorStore: ObservableObject {
 
     func stopAll() {
         startupTokens.removeAll()
+        let activeRecorders = Array(recordingProcesses.values)
+            + appRecordings.keys.compactMap { processes[$0] }
         for id in Set(processes.keys).union(recordingProcesses.keys) { stop(deviceID: id) }
+        let deadline = Date().addingTimeInterval(2.5)
+        while Date() < deadline && activeRecorders.contains(where: \.isRunning) {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
     }
 
     /// A mirror, single-app window or recording is running, or a capture is
     /// still being saved: closing the main window must not quit the app.
     var hasActiveWork: Bool {
-        !processes.isEmpty || !recordingProcesses.isEmpty || !starting.isEmpty || converting > 0
+        !processes.isEmpty || !recordingProcesses.isEmpty || !starting.isEmpty
+            || !recordingPreparing.isEmpty || converting > 0
     }
     /// GIF / WebP files still being made from a finished recording.
     private var converting = 0

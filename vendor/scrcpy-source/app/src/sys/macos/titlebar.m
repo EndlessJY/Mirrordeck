@@ -10,8 +10,9 @@ void sc_audio_player_set_muted(bool muted);
 bool sc_lanadb_set_display_power(bool on);
 bool sc_lanadb_press_key(int keycode);
 // LANADB: on-demand recording of single-app windows.
-bool lanadb_record_start(const char *filename, int format);
+bool lanadb_record_start(const char *filename, int format, bool audio);
 bool lanadb_record_stop(void);
+void sc_lanadb_flush_pending(void);
 enum { LANADB_FORMAT_MP4 = 1, LANADB_FORMAT_MKV = 2 };
 bool sc_lanadb_snapshot(uint8_t **rgba, int *width, int *height);
 void *sc_lanadb_snapshot_buffer(void);
@@ -368,6 +369,12 @@ enum {
     [super setEnabled:enabled];
     [self refreshAppearance];
 }
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
+- (void)updateLayer {
+    [self refreshAppearance];
+}
 - (void)refreshAppearance {
     NSColor *accent = self.activeColor ?: NSColor.systemIndigoColor;
     NSColor *color = !self.enabled ? NSColor.tertiaryLabelColor :
@@ -557,6 +564,7 @@ enum {
             return event;
         }
         if (event.type == NSEventTypeKeyDown && !event.isARepeat) {
+            sc_lanadb_flush_pending();
             NSArray *arguments = [@[@"input", @"keycombination"] arrayByAddingObjectsFromArray:combo];
             dispatch_async(strongSelf.actionQueue, ^{
                 [strongSelf runADB:arguments timeout:5];
@@ -569,6 +577,7 @@ enum {
 - (void)dealloc {
     if (self.keyMonitor) { [NSEvent removeMonitor:self.keyMonitor]; }
     [self.captureTimer invalidate];
+    [self.launchTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
 }
@@ -979,7 +988,8 @@ enum {
                 NSString *target = info[@"recordTo"];
                 int format = [target.pathExtension.lowercaseString
                     isEqualToString:@"mkv"] ? LANADB_FORMAT_MKV : LANADB_FORMAT_MP4;
-                if (!lanadb_record_start(target.fileSystemRepresentation, format)) {
+                BOOL recordAudio = [info[@"recordAudio"] boolValue];
+                if (!lanadb_record_start(target.fileSystemRepresentation, format, recordAudio)) {
                     [self postAction:kind path:nil extra:@{@"finished": @"0", @"failed": @"1"}];
                     self.recordPending = NO;
                     [self endCaptureClock];
@@ -1204,6 +1214,7 @@ enum {
     task.executableURL = [NSURL fileURLWithPath:self.adbPath];
     task.arguments = [@[@"-s", self.serial, @"shell"] arrayByAddingObjectsFromArray:arguments];
     NSPipe *output = [NSPipe pipe];
+    NSFileHandle *reader = output.fileHandleForReading;
     task.standardOutput = output;
     task.standardError = [NSFileHandle fileHandleWithNullDevice];
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
@@ -1215,17 +1226,24 @@ enum {
     if (![task launchAndReturnError:&error]) {
         return nil;
     }
+    __block NSData *bytes = nil;
+    dispatch_semaphore_t readDone = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        bytes = [reader readDataToEndOfFile];
+        dispatch_semaphore_signal(readDone);
+    });
     dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
     if (dispatch_semaphore_wait(finished, deadline) != 0) {
         if (task.running) {
             [task terminate];
         }
+        [reader closeFile];
         return nil;
     }
-    if (task.terminationStatus != 0) {
+    dispatch_semaphore_wait(readDone, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+    if (task.terminationStatus != 0 || !bytes) {
         return nil;
     }
-    NSData *bytes = [output.fileHandleForReading readDataToEndOfFile];
     return [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
 }
 

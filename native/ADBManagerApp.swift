@@ -113,7 +113,9 @@ struct ADBReport: Codable {
                       summary: "等待设备显示的 6 位配对码", detail: "",
                       source: "无线调试配对", endpoint: $0.endpoint)
         }
-        return failedItems + usbItems + pairItems
+        let all = failedItems + usbItems + pairItems
+        var seen = Set<String>()
+        return all.filter { seen.insert($0.id).inserted }
     }
 }
 
@@ -172,9 +174,10 @@ enum Worker {
 
                 let input = Pipe()
                 let output = Pipe()
+                let errorPipe = Pipe()
                 process.standardInput = input
                 process.standardOutput = output
-                process.standardError = output
+                process.standardError = errorPipe
                 try process.run()
                 let request = try JSONSerialization.data(withJSONObject: payload)
                 // try write(contentsOf:): a worker that already exited makes
@@ -182,13 +185,30 @@ enum Worker {
                 try? input.fileHandleForWriting.write(contentsOf: request)
                 try? input.fileHandleForWriting.close()
 
-                let bytes = output.fileHandleForReading.readDataToEndOfFile()
+                var bytes = Data()
+                var errBytes = Data()
+                let group = DispatchGroup()
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    bytes = output.fileHandleForReading.readDataToEndOfFile()
+                    group.leave()
+                }
+                group.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    errBytes = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                    group.leave()
+                }
                 process.waitUntilExit()
+                group.wait()
+
                 let lines = String(data: bytes, encoding: .utf8)?.split(separator: "\n") ?? []
                 guard let last = lines.last,
                       let data = String(last).data(using: .utf8),
-                      let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw WorkerError.failed("设备扫描没有返回结果")
+                      let response = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                    let errLine = String(data: errBytes, encoding: .utf8)?
+                        .split(separator: "\n").last.map(String.init)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    throw WorkerError.failed(errLine.isEmpty ? "设备扫描没有返回结果" : errLine)
                 }
                 if let error = response["error"] as? String {
                     throw WorkerError.failed(error)
@@ -225,7 +245,7 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
 
     func start() {
         Self.instances.add(self)
-        Self.killOrphanTrackers()
+        DispatchQueue.global(qos: .utility).async { Self.killOrphanTrackers() }
         for type in ["_adb._tcp.", "_adb-tls-connect._tcp.", "_adb-tls-pairing._tcp."] {
             let browser = NetServiceBrowser()
             browser.delegate = self
@@ -284,7 +304,7 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
         guard let adb = Bundle.main.resourceURL?.appendingPathComponent("Tools/adb").path else { return }
         let ps = Process()
         ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-        ps.arguments = ["-axo", "pid=,ppid=,command="]
+        ps.arguments = ["-axww", "-o", "pid=,ppid=,command="]
         let output = Pipe()
         ps.standardOutput = output
         ps.standardError = FileHandle.nullDevice
@@ -435,6 +455,15 @@ final class DeviceStore: ObservableObject {
 
     private func scheduleFallback() {
         timer?.invalidate()
+        let waitingIOSAuth = report?.usbIssues.contains {
+            $0.state == "ios_untrusted" || $0.state == "ios_locked"
+        } == true
+        if waitingIOSAuth {
+            timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+                self?.scan(full: false)
+            }
+            return
+        }
         let needsRecovery = report?.devices.isEmpty != false || report?.issues.isEmpty == false
         timer = Timer.scheduledTimer(withTimeInterval: needsRecovery ? 45 : 90,
                                      repeats: false) { [weak self] _ in
@@ -460,7 +489,7 @@ final class DeviceStore: ObservableObject {
         scanning = true
         scanningNetwork = full
         error = nil
-        if report == nil { phase = "正在发现设备…" }
+        if report == nil || phase == "扫描失败" { phase = "正在发现设备…" }
         if full { phase = "正在刷新设备…" }
         let usbCheck = usbCheckPending
         usbCheckPending = false
@@ -520,7 +549,11 @@ final class DeviceStore: ObservableObject {
                 // The user's request goes first; it schedules the next scan.
                 self.queuedAction = nil
                 self.actionQueued = false
-                if needsImmediateRecovery { self.pendingScan = self.autoSubnet }
+                if needsImmediateRecovery {
+                    self.pendingScan = (self.pendingScan ?? false) || self.autoSubnet
+                } else if self.initialSweepPending && self.pendingScan == nil {
+                    self.pendingScan = self.autoSubnet
+                }
                 action()
             } else if let pending = self.pendingScan {
                 self.pendingScan = nil
@@ -530,6 +563,7 @@ final class DeviceStore: ObservableObject {
                 self.requestScan(full: pending || (needsImmediateRecovery && self.autoSubnet),
                                  delay: delay)
             } else if needsImmediateRecovery {
+                self.initialSweepPending = false
                 self.requestScan(full: self.autoSubnet, delay: 0.25)
             } else {
                 self.scheduleFallback()
@@ -581,6 +615,8 @@ final class DeviceStore: ObservableObject {
             self.actionBusy = false
             let pending = self.pendingScan
             self.pendingScan = nil
+            let wasInitialSweep = self.initialSweepPending
+            self.initialSweepPending = false
             switch response {
             case .success(let value):
                 let result = value["result"] as? [String: Any] ?? [:]
@@ -588,15 +624,15 @@ final class DeviceStore: ObservableObject {
                 let message = result["reason"] as? String ??
                               result["message"] as? String ?? "操作未完成"
                 completion(ok, message)
-                if ok || pending != nil {
+                if ok || pending != nil || wasInitialSweep {
                     self.requestScan(full: pending ?? false)
                 } else {
                     self.scheduleFallback()
                 }
             case .failure(let failure):
                 completion(false, failure.localizedDescription)
-                if let pending {
-                    self.requestScan(full: pending)
+                if pending != nil || wasInitialSweep {
+                    self.requestScan(full: pending ?? false)
                 } else {
                     self.scheduleFallback()
                 }
@@ -619,13 +655,15 @@ struct SidebarSelection: ViewModifier {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(selected ? (active ? Theme.accent : Color.primary.opacity(0.11)) :
-                      hovering ? Color.primary.opacity(0.05) : Color.clear))
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(selected ? (active ? Theme.accent : Color.primary.opacity(0.11)) :
+                          hovering ? Color.primary.opacity(0.05) : Color.clear)
+                    .animation(Theme.quick, value: selected)
+            )
             .environment(\.sidebarRowHighlighted, selected && active)
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
-            .animation(Theme.quick, value: selected)
     }
 }
 
@@ -745,6 +783,7 @@ final class DeviceInfoStore: ObservableObject {
         var version: Int?
     }
     private static let cacheVersion = 3
+    private static let persistQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.deviceinfo", qos: .utility)
 
     @Published private(set) var sections: [String: [DeviceInfoSection]] = [:]
     @Published private(set) var loading: Set<String> = []
@@ -778,10 +817,13 @@ final class DeviceInfoStore: ObservableObject {
                 entries[id] = Entry(sections: value, fullAt: date, version: Self.cacheVersion)
             }
         }
-        guard let data = try? JSONEncoder().encode(entries) else { return }
-        try? FileManager.default.createDirectory(at: Self.cacheURL.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        try? data.write(to: Self.cacheURL, options: .atomic)
+        let targetURL = Self.cacheURL
+        Self.persistQueue.async {
+            guard let data = try? JSONEncoder().encode(entries) else { return }
+            try? FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? data.write(to: targetURL, options: .atomic)
+        }
     }
 
     func load(_ device: ADBDevice, force: Bool = false) {
@@ -818,11 +860,15 @@ final class DeviceInfoStore: ObservableObject {
                 }
                 if scope == "all" {
                     self.sections[id] = fresh
-                    self.fullAt[id] = Date()
+                    if !fresh.isEmpty {
+                        self.fullAt[id] = Date()
+                    }
                 } else {
                     self.sections[id] = Self.merge(self.sections[id] ?? [], with: fresh)
                 }
-                self.dynamicAt[id] = Date()
+                if !fresh.isEmpty {
+                    self.dynamicAt[id] = Date()
+                }
                 self.errors[id] = nil
                 self.persist()
             case .failure(let failure):
@@ -833,7 +879,11 @@ final class DeviceInfoStore: ObservableObject {
 
     private static func merge(_ cached: [DeviceInfoSection],
                               with fresh: [DeviceInfoSection]) -> [DeviceInfoSection] {
+        guard !fresh.isEmpty else { return cached }
         var result = cached
+        if !fresh.contains(where: { $0.title == "电池" }) {
+            result.removeAll { $0.title == "电池" }
+        }
         for section in fresh {
             guard let index = result.firstIndex(where: { $0.title == section.title }) else {
                 result.append(section)
@@ -916,7 +966,7 @@ struct DeviceDetail: View {
         }
         // A different device starts at the top instead of the old scroll offset.
         .id(device.identity)
-        .task(id: device.identity) { info.load(device) }
+        .task(id: "\(device.identity)|\(device.connected)") { info.load(device) }
     }
 
     // MARK: Header
@@ -1300,7 +1350,7 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(height: 452)
+            .frame(minHeight: 452)
             .tabItem { Label("投屏", systemImage: "display") }
 
             Form {
@@ -1348,7 +1398,7 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(height: 510)
+            .frame(minHeight: 510)
             .tabItem { Label("录制", systemImage: "record.circle") }
         }
         .frame(width: 540)
@@ -1433,6 +1483,14 @@ struct ActionSheetView: View {
     @State private var code = ""
     @State private var message = ""
 
+    private var trimmedEndpoint: String {
+        endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedCode: String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text(mode == .connect ? "手动连接设备" : "无线调试配对")
@@ -1471,16 +1529,16 @@ struct ActionSheetView: View {
                 }
                 .keyboardShortcut(.cancelAction)
                 Button(mode == .connect ? "连接" : "配对") {
-                    store.perform(mode.rawValue, endpoint: endpoint.trimmingCharacters(in: .whitespaces),
-                                  code: code.trimmingCharacters(in: .whitespaces)) { ok, text in
+                    store.perform(mode.rawValue, endpoint: trimmedEndpoint,
+                                  code: trimmedCode) { ok, text in
                         if ok { dismiss() } else { message = text }
                         code = ""
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(store.actionBusy || store.actionQueued || endpoint.isEmpty ||
-                          (mode == .pair && code.count != 6))
+                .disabled(store.actionBusy || store.actionQueued || trimmedEndpoint.isEmpty ||
+                          (mode == .pair && trimmedCode.count != 6))
             }
         }
         .onChange(of: endpoint) { message = "" }
@@ -1499,6 +1557,7 @@ struct ContentView: View {
     /// slides open, so launch shows one calm loading state instead of an
     /// empty column.
     @State private var columns: NavigationSplitViewVisibility = .detailOnly
+    @FocusState private var sidebarFocused: Bool
 
     private var selectedDevice: ADBDevice? {
         store.report?.devices.first { "device:" + $0.identity == store.selectedID }
@@ -1511,40 +1570,51 @@ struct ContentView: View {
         NavigationSplitView(columnVisibility: $columns) {
             // Rows draw their own selection; List's native highlight would sit
             // underneath as a second, differently coloured layer.
-            List {
-                if let report = store.report, !report.devices.isEmpty {
-                    Section {
-                        ForEach(report.devices) { device in
-                            let id = "device:" + device.identity
-                            DeviceSidebarRow(device: device, selected: store.selectedID == id)
-                                .onTapGesture { store.selectedID = id }
-                                .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
-                                .listRowBackground(Color.clear)
+            ScrollViewReader { proxy in
+                List {
+                    if let report = store.report, !report.devices.isEmpty {
+                        Section {
+                            ForEach(report.devices) { device in
+                                let id = "device:" + device.identity
+                                DeviceSidebarRow(device: device, selected: store.selectedID == id)
+                                    .id(id)
+                                    .onTapGesture {
+                                        store.selectedID = id
+                                        sidebarFocused = true
+                                    }
+                                    .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                                    .listRowBackground(Color.clear)
+                            }
+                        } header: {
+                            SidebarHeader(title: "设备", count: report.devices.count,
+                                          searching: !store.initialSweepDone)
                         }
-                    } header: {
-                        SidebarHeader(title: "设备", count: report.devices.count,
-                                      searching: !store.initialSweepDone)
+                    }
+                    if let issues = store.report?.issues, !issues.isEmpty {
+                        Section {
+                            ForEach(issues) { issue in
+                                IssueSidebarRow(issue: issue, selected: store.selectedID == issue.id)
+                                    .id(issue.id)
+                                    .onTapGesture {
+                                        store.selectedID = issue.id
+                                        sidebarFocused = true
+                                    }
+                                    .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                                    .listRowBackground(Color.clear)
+                            }
+                        } header: {
+                            SidebarHeader(title: "需要处理", count: issues.count)
+                        }
                     }
                 }
-                if let issues = store.report?.issues, !issues.isEmpty {
-                    Section {
-                        ForEach(issues) { issue in
-                            IssueSidebarRow(issue: issue, selected: store.selectedID == issue.id)
-                                .onTapGesture { store.selectedID = issue.id }
-                                .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
-                                .listRowBackground(Color.clear)
-                        }
-                    } header: {
-                        SidebarHeader(title: "需要处理", count: issues.count)
-                    }
-                }
+                .listStyle(.sidebar)
+                .focusable()
+                .focused($sidebarFocused)
+                .focusEffectDisabled()
+                .onKeyPress(.downArrow) { moveSelection(1, proxy: proxy) }
+                .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
+                .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
             }
-            .listStyle(.sidebar)
-            .focusable()
-            .focusEffectDisabled()
-            .onKeyPress(.downArrow) { moveSelection(1) }
-            .onKeyPress(.upArrow) { moveSelection(-1) }
-            .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
             .navigationSplitViewColumnWidth(min: 240, ideal: 270)
         } detail: {
             ZStack {
@@ -1565,6 +1635,15 @@ struct ContentView: View {
                         Label("没有发现设备", systemImage: "smartphone")
                     } description: {
                         Text("用 USB 连接设备，或让设备与 Mac 处于同一局域网并打开无线调试。设备出现后会自动显示。")
+                    }
+                } else if store.report == nil, let error = store.error, !store.scanning {
+                    ContentUnavailableView {
+                        Label("扫描失败", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text(error)
+                    } actions: {
+                        Button("重新扫描") { store.scan(full: false) }
+                            .buttonStyle(.borderedProminent)
                     }
                 } else if store.report == nil {
                     // The only progress shown before the first result.
@@ -1608,12 +1687,16 @@ struct ContentView: View {
     }
 
     /// Arrow keys move through devices and issues, as in a native list.
-    private func moveSelection(_ offset: Int) -> KeyPress.Result {
+    private func moveSelection(_ offset: Int, proxy: ScrollViewProxy) -> KeyPress.Result {
         guard let report = store.report else { return .ignored }
         let ids = report.devices.map { "device:" + $0.identity } + report.issues.map(\.id)
         guard !ids.isEmpty else { return .ignored }
         let current = store.selectedID.flatMap { ids.firstIndex(of: $0) } ?? (offset > 0 ? -1 : ids.count)
-        store.selectedID = ids[max(0, min(ids.count - 1, current + offset))]
+        let nextID = ids[max(0, min(ids.count - 1, current + offset))]
+        store.selectedID = nextID
+        withAnimation(Theme.quick) {
+            proxy.scrollTo(nextID)
+        }
         return .handled
     }
 
@@ -1696,6 +1779,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private static var busy: Bool {
         MirrorStore.shared.hasActiveWork || IOSMirrorStore.shared.hasActiveWork
+            || AppWindowStore.shared.hasActiveWork
     }
 
     private var idleTimer: Timer?

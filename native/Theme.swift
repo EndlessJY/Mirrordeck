@@ -89,22 +89,23 @@ struct Chip: View {
 struct StatusDot: View {
     let color: Color
     var pulsing = false
-    @State private var expanded = false
 
     var body: some View {
         ZStack {
             if pulsing {
-                Circle()
-                    .stroke(color.opacity(expanded ? 0 : 0.55), lineWidth: 1.5)
-                    .frame(width: expanded ? 15 : 7, height: expanded ? 15 : 7)
-                    .animation(.easeOut(duration: 1.4).repeatForever(autoreverses: false),
-                               value: expanded)
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                    let phase = context.date.timeIntervalSinceReferenceDate
+                        .truncatingRemainder(dividingBy: 1.4) / 1.4
+                    let eased = 1 - (1 - phase) * (1 - phase)
+                    let size = 7 + 8 * eased
+                    Circle()
+                        .stroke(color.opacity(0.55 * (1 - eased)), lineWidth: 1.5)
+                        .frame(width: size, height: size)
+                }
             }
             Circle().fill(color).frame(width: 7, height: 7)
         }
         .frame(width: 16, height: 16)
-        .onAppear { if pulsing { expanded = true } }
-        .onChange(of: pulsing) { expanded = pulsing }
     }
 }
 
