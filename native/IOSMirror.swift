@@ -537,7 +537,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         // H.265 when a dedicated video connection supports it (.muxed connections
         // carry their own compressed stream and are remuxed below).
         if let connection = movieOutput.connection(with: .video),
-           movieOutput.availableVideoCodecTypes.contains(.hevc) {
+           movieOutput.supportedOutputSettingsKeys(for: connection).contains(AVVideoCodecKey) {
             movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
         }
         let includeAudio = !isGIF && RecordingSettings.recordsAudio
@@ -596,50 +596,75 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         }
     }
 
+    private struct TrackMetadata {
+        let videoTrack: AVAssetTrack
+        let formatHint: CMFormatDescription?
+        let preferredTransform: CGAffineTransform
+        let videoTimeRange: CMTimeRange
+        let audioTrack: AVAssetTrack?
+        let audioTimeRange: CMTimeRange?
+    }
+
     /// Converts the captured `.mov` into `.mp4`: passes H.264/HEVC video packets
     /// straight through without re-encoding and encodes LPCM audio to AAC (since
     /// `.mp4` rejects uncompressed LPCM), falling back to `AVAssetExportSession`
     /// if the source video codec requires transcoding.
     private static func exportMP4(from source: URL, to destination: URL, includeAudio: Bool,
                                   completion: @escaping (Bool) -> Void) {
-        try? FileManager.default.removeItem(at: destination)
-        let asset = AVURLAsset(url: source)
-        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
-            completion(false)
-            return
+        Task.detached(priority: .userInitiated) {
+            try? FileManager.default.removeItem(at: destination)
+            let asset = AVURLAsset(url: source)
+            guard let videoTrack = (try? await asset.loadTracks(withMediaType: .video))?.first,
+                  let descriptions = try? await videoTrack.load(.formatDescriptions),
+                  let transform = try? await videoTrack.load(.preferredTransform),
+                  let videoRange = try? await videoTrack.load(.timeRange) else {
+                completion(false)
+                return
+            }
+            var audioTrack: AVAssetTrack?
+            var audioRange: CMTimeRange?
+            if includeAudio,
+               let track = (try? await asset.loadTracks(withMediaType: .audio))?.first,
+               let range = try? await track.load(.timeRange) {
+                audioTrack = track
+                audioRange = range
+            }
+            let meta = TrackMetadata(
+                videoTrack: videoTrack,
+                formatHint: descriptions.first,
+                preferredTransform: transform,
+                videoTimeRange: videoRange,
+                audioTrack: audioTrack,
+                audioTimeRange: audioRange
+            )
+            let subType = descriptions.first.map { CMFormatDescriptionGetMediaSubType($0) }
+            let canPassthroughVideo = subType == kCMVideoCodecType_HEVC || subType == kCMVideoCodecType_H264
+            if canPassthroughVideo, remuxVideoPassthrough(asset: asset, meta: meta,
+                                                          to: destination, completion: completion) {
+                return
+            }
+            exportTranscoded(meta: meta, to: destination, completion: completion)
         }
-        let subType: CMVideoCodecType? = videoTrack.formatDescriptions.first.map {
-            CMFormatDescriptionGetMediaSubType($0 as! CMFormatDescription)
-        }
-        let canPassthroughVideo = subType == kCMVideoCodecType_HEVC || subType == kCMVideoCodecType_H264
-        if canPassthroughVideo, remuxVideoPassthrough(asset: asset, videoTrack: videoTrack,
-                                                      to: destination, includeAudio: includeAudio,
-                                                      completion: completion) {
-            return
-        }
-        exportTranscoded(asset: asset, videoTrack: videoTrack, to: destination,
-                         includeAudio: includeAudio, completion: completion)
     }
 
-    private static func remuxVideoPassthrough(asset: AVAsset, videoTrack: AVAssetTrack,
-                                              to destination: URL, includeAudio: Bool,
+    private static func remuxVideoPassthrough(asset: AVAsset, meta: TrackMetadata,
+                                              to destination: URL,
                                               completion: @escaping (Bool) -> Void) -> Bool {
         guard let reader = try? AVAssetReader(asset: asset),
               let writer = try? AVAssetWriter(outputURL: destination, fileType: .mp4) else {
             return false
         }
         writer.shouldOptimizeForNetworkUse = true
-        let videoOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
+        let videoOut = AVAssetReaderTrackOutput(track: meta.videoTrack, outputSettings: nil)
         videoOut.alwaysCopiesSampleData = false
-        let formatHint = videoTrack.formatDescriptions.first.map { $0 as! CMFormatDescription }
-        let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: formatHint)
-        videoIn.transform = videoTrack.preferredTransform
+        let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: meta.formatHint)
+        videoIn.transform = meta.preferredTransform
         guard reader.canAdd(videoOut), writer.canAdd(videoIn) else { return false }
         reader.add(videoOut)
         writer.add(videoIn)
 
         var audioPair: (AVAssetReaderTrackOutput, AVAssetWriterInput)?
-        if includeAudio, let audioTrack = asset.tracks(withMediaType: .audio).first {
+        if let audioTrack = meta.audioTrack {
             let pcmSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVLinearPCMIsFloatKey: false,
@@ -718,8 +743,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
             if reader.status == .failed {
                 writer.cancelWriting()
                 try? FileManager.default.removeItem(at: destination)
-                exportTranscoded(asset: asset, videoTrack: videoTrack, to: destination,
-                                 includeAudio: includeAudio, completion: completion)
+                exportTranscoded(meta: meta, to: destination, completion: completion)
                 return
             }
             writer.finishWriting {
@@ -727,30 +751,28 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
                     completion(true)
                 } else {
                     try? FileManager.default.removeItem(at: destination)
-                    exportTranscoded(asset: asset, videoTrack: videoTrack, to: destination,
-                                     includeAudio: includeAudio, completion: completion)
+                    exportTranscoded(meta: meta, to: destination, completion: completion)
                 }
             }
         }
         return true
     }
 
-    private static func exportTranscoded(asset: AVAsset, videoTrack: AVAssetTrack,
-                                         to destination: URL, includeAudio: Bool,
+    private static func exportTranscoded(meta: TrackMetadata, to destination: URL,
                                          completion: @escaping (Bool) -> Void) {
         try? FileManager.default.removeItem(at: destination)
         let composition = AVMutableComposition()
         guard let compVideo = composition.addMutableTrack(
             withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-              (try? compVideo.insertTimeRange(videoTrack.timeRange, of: videoTrack, at: .zero)) != nil else {
+              (try? compVideo.insertTimeRange(meta.videoTimeRange, of: meta.videoTrack, at: .zero)) != nil else {
             completion(false)
             return
         }
-        compVideo.preferredTransform = videoTrack.preferredTransform
-        if includeAudio, let audioTrack = asset.tracks(withMediaType: .audio).first,
+        compVideo.preferredTransform = meta.preferredTransform
+        if let audioTrack = meta.audioTrack, let audioRange = meta.audioTimeRange,
            let compAudio = composition.addMutableTrack(
                withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try? compAudio.insertTimeRange(audioTrack.timeRange, of: audioTrack, at: .zero)
+            try? compAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
         }
         guard let export = AVAssetExportSession(asset: composition,
                                                 presetName: AVAssetExportPresetHighestQuality) else {
