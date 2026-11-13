@@ -193,7 +193,7 @@ struct IconTile: View {
         case .tinted(let color):
             shape.fill(color.opacity(theme.isAppleNative ? 0.11 : 0.13))
         case .plain:
-            shape.fill(Color.white.opacity(0.20))
+            shape.fill(Color.white.opacity(theme.isAppleNative ? 0.20 : 0.22))
         }
     }
 }
