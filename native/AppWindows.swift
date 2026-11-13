@@ -109,6 +109,7 @@ final class AppWindowStore: ObservableObject {
         environment["LANADB_ADB"] = adb
         environment["LANADB_SERIAL"] = serial
         environment["LANADB_APP_WINDOW"] = "1"
+        environment["LANADB_ARROW_SWIPE"] = MirrorStore.arrowSwipe ? "1" : "0"
         environment["LANADB_RECORDING"] = "0"
         environment["LANADB_GAMUT"] = "srgb"
         environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
@@ -316,6 +317,9 @@ final class AppWindowStore: ObservableObject {
             // as it does on the phone; closing the window moves the app back
             // to the phone instead of ending it.
             "--new-display", "--no-vd-destroy-content",
+            // The keyboard shows inside this window, on the app's own display,
+            // not on the phone's screen.
+            "--display-ime-policy=local",
             "--start-app=\(app.package)",
             "--max-fps=\(options.maxFPS)",
             "--video-bit-rate=\(options.videoBitrateMbps)M",
@@ -325,12 +329,15 @@ final class AppWindowStore: ObservableObject {
         ]
         if options.maxSize > 0 { arguments.append("--max-size=\(options.maxSize)") }
         // AAC allows single-app MP4 recordings to mux live audio playable in chat apps.
-        arguments.append(options.audio ? "--audio-codec=aac" : "--no-audio")
+        // While the main mirror carries the device's sound (this app's included),
+        // the window does not capture it again: see mainMirrorCapturesAudio.
+        let audio = options.audio && !MirrorStore.shared.mainMirrorCapturesAudio(for: device)
+        arguments.append(audio ? "--audio-codec=aac" : "--no-audio")
         process.arguments = arguments
         let token = UUID().uuidString
         var environment = environment(serial: transport.endpoint, tools: tools)
         environment["LANADB_SESSION_TOKEN"] = token
-        environment["LANADB_AUDIO_ENABLED"] = options.audio ? "1" : "0"
+        environment["LANADB_AUDIO_ENABLED"] = audio ? "1" : "0"
         environment["LANADB_APP_LABEL"] = app.label
         if let data = iconData[id]?[app.package] {
             let icon = FileManager.default.temporaryDirectory

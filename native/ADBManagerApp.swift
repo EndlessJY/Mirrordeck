@@ -1587,6 +1587,7 @@ struct MirrorSettingsView: View {
     @AppStorage(RecordingSettings.gifQualityKey) private var gifQuality = "standard"
     @AppStorage(RecordingSettings.animatedFormatKey) private var animatedFormat = "webp"
     @AppStorage(DeviceStore.subnetScanKey) private var subnetScan = false
+    @AppStorage(MirrorStore.arrowSwipeKey) private var arrowSwipe = true
 
     private var saveURL: URL { DeviceActions.saveDirectoryURL(saveDirectory) }
 
@@ -1649,6 +1650,12 @@ struct MirrorSettingsView: View {
                     .disabled(!audioEnabled)
                 } header: {
                     Text("音频")
+                }
+                Section {
+                    Toggle("上下方向键滑动屏幕", isOn: $arrowSwipe)
+                        .help("在投屏窗口按 ↑ / ↓ 上下滑动屏幕，刷短视频时切换上一条或下一条；关闭后方向键按原样发送给设备")
+                } header: {
+                    Text("键盘")
                 }
                 Section {
                     Toggle("定时刷新设备", isOn: $subnetScan)

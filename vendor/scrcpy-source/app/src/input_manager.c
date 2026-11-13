@@ -452,6 +452,80 @@ inverse_point(struct sc_point point, struct sc_size size,
     return point;
 }
 
+// LANADB: arrow-key swipes. A finger is pressed in the middle of the screen
+// and drawn over about 40% of its height in 14 steps (~170 ms), so apps see a
+// real fling. One swipe at a time; keys pressed meanwhile are ignored.
+#define LANADB_SWIPE_STEPS 14
+#define LANADB_SWIPE_STEP_MS 12
+
+static struct {
+    struct sc_input_manager *im;
+    struct sc_size size;
+    int32_t x, from_y, to_y;
+    int step;
+    SDL_TimerID timer;
+} lanadb_swipe_state;
+
+static bool
+lanadb_arrow_swipe_enabled(void) {
+    const char *value = getenv("LANADB_ARROW_SWIPE");
+    return value && !strcmp(value, "1");
+}
+
+static void
+lanadb_swipe_touch(enum android_motionevent_action action, int32_t y) {
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+    msg.inject_touch_event.action = action;
+    msg.inject_touch_event.position.screen_size = lanadb_swipe_state.size;
+    msg.inject_touch_event.position.point =
+        (struct sc_point) {lanadb_swipe_state.x, y};
+    msg.inject_touch_event.pointer_id = SC_POINTER_ID_GENERIC_FINGER;
+    msg.inject_touch_event.pressure =
+        action == AMOTION_EVENT_ACTION_UP ? 0.0f : 1.0f;
+    msg.inject_touch_event.action_button = 0;
+    msg.inject_touch_event.buttons = 0;
+    if (!sc_controller_push_msg(lanadb_swipe_state.im->controller, &msg)) {
+        LOGW("Could not inject swipe");
+    }
+}
+
+static Uint32 SDLCALL
+lanadb_swipe_tick(void *userdata, SDL_TimerID timer, Uint32 interval) {
+    (void) userdata;
+    (void) timer;
+    int step = ++lanadb_swipe_state.step;
+    int32_t from = lanadb_swipe_state.from_y, to = lanadb_swipe_state.to_y;
+    int32_t y = from + (to - from) * step / LANADB_SWIPE_STEPS;
+    if (step < LANADB_SWIPE_STEPS) {
+        lanadb_swipe_touch(AMOTION_EVENT_ACTION_MOVE, y);
+        return interval;
+    }
+    lanadb_swipe_touch(AMOTION_EVENT_ACTION_UP, to);
+    lanadb_swipe_state.timer = 0;
+    return 0;
+}
+
+static void
+lanadb_swipe(struct sc_input_manager *im, bool next) {
+    struct sc_size size = im->screen->frame_size;
+    if (lanadb_swipe_state.timer || !im->controller
+            || !size.width || !size.height) {
+        return;
+    }
+    lanadb_swipe_state.im = im;
+    lanadb_swipe_state.size = size;
+    lanadb_swipe_state.x = size.width / 2;
+    // ↓ = next: the finger moves up the screen; ↑ = previous: down.
+    int32_t low = size.height * 70 / 100, high = size.height * 30 / 100;
+    lanadb_swipe_state.from_y = next ? low : high;
+    lanadb_swipe_state.to_y = next ? high : low;
+    lanadb_swipe_state.step = 0;
+    lanadb_swipe_touch(AMOTION_EVENT_ACTION_DOWN, lanadb_swipe_state.from_y);
+    lanadb_swipe_state.timer =
+        SDL_AddTimer(LANADB_SWIPE_STEP_MS, lanadb_swipe_tick, NULL);
+}
+
 static void
 sc_input_manager_process_key(struct sc_input_manager *im,
                              const SDL_KeyboardEvent *event) {
@@ -731,6 +805,16 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     }
 
     assert(!im->camera);
+
+    // LANADB: ↑ / ↓ without modifiers swipe the screen (previous / next item
+    // in short-video apps, scrolling elsewhere) instead of sending D-pad keys.
+    if (lanadb_arrow_swipe_enabled() && !mod && !im->ime_composing
+            && (sdl_keycode == SDLK_UP || sdl_keycode == SDLK_DOWN)) {
+        if (down && !repeat) {
+            lanadb_swipe(im, sdl_keycode == SDLK_DOWN);
+        }
+        return;
+    }
 
     uint64_t ack_to_wait = SC_SEQUENCE_INVALID;
     bool is_ctrl_v = ctrl && !shift && sdl_keycode == SDLK_V && down && !repeat;

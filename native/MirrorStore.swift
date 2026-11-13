@@ -27,6 +27,11 @@ final class MirrorStore: ObservableObject {
     static let shared = MirrorStore()
     static let revealInFinderKey = "capture.revealInFinder"
     static let copyToClipboardKey = "capture.copyToClipboard"
+    /// ↑ / ↓ swipe the screen in mirror windows (on by default).
+    static let arrowSwipeKey = "mirror.arrowSwipe"
+    static var arrowSwipe: Bool {
+        UserDefaults.standard.object(forKey: arrowSwipeKey) as? Bool ?? true
+    }
     private var copyAutomatically: Bool {
         UserDefaults.standard.object(forKey: Self.copyToClipboardKey) as? Bool ?? true
     }
@@ -792,6 +797,7 @@ final class MirrorStore: ObservableObject {
         environment["LANADB_SESSION_TOKEN"] = actionToken
         environment["LANADB_RECORDING"] = "0"
         environment["LANADB_AUDIO_ENABLED"] = options.audio ? "1" : "0"
+        environment["LANADB_ARROW_SWIPE"] = Self.arrowSwipe ? "1" : "0"
         environment["LANADB_GAMUT"] = "srgb"
         environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
         environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
@@ -955,6 +961,14 @@ final class MirrorStore: ObservableObject {
         while Date() < deadline && activeRecorders.contains(where: \.isRunning) {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
+    }
+
+    /// The device's main mirror is capturing its sound. Android lets only one
+    /// capture of the device's output work at a time: a second one (a
+    /// single-app window) takes it over, and when that window closes the
+    /// sound goes back to the phone's speaker instead of the mirror.
+    func mainMirrorCapturesAudio(for device: ADBDevice) -> Bool {
+        processes[device.identity] != nil && sessionOptions[device.identity]?.audio == true
     }
 
     /// A mirror, single-app window or recording is running, or a capture is
