@@ -301,7 +301,8 @@ sc_recorder_process_header(struct sc_recorder *recorder) {
         }
         // LANADB: QuickTime and Finder only play H.265 in MP4 tagged 'hvc1'
         // (parameter sets in the sample description), not 'hev1'.
-        if (video_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
+        if (recorder->format == SC_RECORD_FORMAT_MP4
+                && video_stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
             video_stream->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
         }
     }
@@ -554,18 +555,6 @@ end:
     return !error;
 }
 
-static bool
-sc_recorder_record(struct sc_recorder *recorder) {
-    bool ok = sc_recorder_open_output_file(recorder);
-    if (!ok) {
-        return false;
-    }
-
-    ok = sc_recorder_process_packets(recorder);
-    sc_recorder_close_output_file(recorder);
-    return ok;
-}
-
 static int
 run_recorder(void *data) {
     struct sc_recorder *recorder = data;
@@ -574,15 +563,17 @@ run_recorder(void *data) {
     bool ok = sc_thread_set_priority(SC_THREAD_PRIORITY_LOW);
     (void) ok; // We don't care if it worked
 
-    bool success = sc_recorder_record(recorder);
+    bool success = sc_recorder_process_packets(recorder);
 
     sc_mutex_lock(&recorder->mutex);
-    // Prevent the producer from pushing any new packet
+    // Prevent the producer from pushing any new packet or opening streams
     recorder->stopped = true;
     // Discard pending packets
     sc_recorder_queue_clear(&recorder->video_queue);
     sc_recorder_queue_clear(&recorder->audio_queue);
     sc_mutex_unlock(&recorder->mutex);
+
+    sc_recorder_close_output_file(recorder);
 
     if (success) {
         const char *format_name = sc_recorder_get_format_name(recorder->format);
@@ -750,6 +741,10 @@ sc_recorder_audio_packet_sink_open(struct sc_packet_sink *sink,
     assert(!recorder->audio_init);
 
     sc_mutex_lock(&recorder->mutex);
+    if (recorder->stopped) {
+        sc_mutex_unlock(&recorder->mutex);
+        return false;
+    }
 
     AVStream *stream = avformat_new_stream(recorder->ctx, NULL);
     if (!stream) {
@@ -931,10 +926,15 @@ error_free_filename:
 
 bool
 sc_recorder_start(struct sc_recorder *recorder) {
+    if (!sc_recorder_open_output_file(recorder)) {
+        return false;
+    }
+
     bool ok = sc_thread_create(&recorder->thread, run_recorder,
                                "scrcpy-recorder", recorder);
     if (!ok) {
         LOGE("Could not start recorder thread");
+        sc_recorder_close_output_file(recorder);
         return false;
     }
 

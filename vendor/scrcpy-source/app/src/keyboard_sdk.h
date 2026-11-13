@@ -32,4 +32,8 @@ sc_keyboard_sdk_init(struct sc_keyboard_sdk *kb,
 bool
 sc_lanadb_is_typing_paste(const char *text);
 
+// LANADB: flush any buffered typing text before injecting editing shortcuts.
+void
+sc_lanadb_flush_pending(void);
+
 #endif

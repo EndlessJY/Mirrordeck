@@ -10,8 +10,9 @@ void sc_audio_player_set_muted(bool muted);
 bool sc_lanadb_set_display_power(bool on);
 bool sc_lanadb_press_key(int keycode);
 // LANADB: on-demand recording of single-app windows.
-bool lanadb_record_start(const char *filename, int format);
+bool lanadb_record_start(const char *filename, int format, bool audio);
 bool lanadb_record_stop(void);
+void sc_lanadb_flush_pending(void);
 enum { LANADB_FORMAT_MP4 = 1, LANADB_FORMAT_MKV = 2 };
 bool sc_lanadb_snapshot(uint8_t **rgba, int *width, int *height);
 void *sc_lanadb_snapshot_buffer(void);
@@ -262,6 +263,9 @@ enum {
     [stack.centerYAnchor constraintEqualToAnchor:self.centerYAnchor constant:-20].active = YES;
     return self;
 }
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
 - (void)updateLayer {
     self.layer.backgroundColor = NSColor.windowBackgroundColor.CGColor;
 }
@@ -368,6 +372,12 @@ enum {
     [super setEnabled:enabled];
     [self refreshAppearance];
 }
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
+- (void)updateLayer {
+    [self refreshAppearance];
+}
 - (void)refreshAppearance {
     NSColor *accent = self.activeColor ?: NSColor.systemIndigoColor;
     NSColor *color = !self.enabled ? NSColor.tertiaryLabelColor :
@@ -421,11 +431,15 @@ enum {
 @property(nonatomic, strong) id keyMonitor;
 @property(nonatomic) NSUInteger stateRevision;
 @property(nonatomic) BOOL temporarilyLoweredForFinder;
+@property(nonatomic) BOOL nativeTheme;
 @property(nonatomic, strong) dispatch_queue_t actionQueue;
 @property(nonatomic, strong) dispatch_queue_t statusQueue;
 - (instancetype)initWithWindow:(NSWindow *)window
                         serial:(NSString *)serial
                        adbPath:(NSString *)adbPath;
+- (NSColor *)accentColor;
+- (void)applyAppearanceMode:(NSString *)mode;
+- (void)themeChanged:(NSNotification *)notification;
 @end
 
 @implementation LANADBTitlebarController {
@@ -452,6 +466,12 @@ enum {
         strcmp(getenv("LANADB_AUDIO_ENABLED"), "0") != 0;
     _musicMuted = sc_audio_player_is_muted();
     _appWindow = getenv("LANADB_APP_WINDOW") && !strcmp(getenv("LANADB_APP_WINDOW"), "1");
+    const char *themeEnv = getenv("LANADB_THEME");
+    _nativeTheme = themeEnv && !strcmp(themeEnv, "native");
+    const char *appearanceEnv = getenv("LANADB_APPEARANCE");
+    if (appearanceEnv && appearanceEnv[0]) {
+        [self applyAppearanceMode:[NSString stringWithUTF8String:appearanceEnv]];
+    }
     _actionQueue = dispatch_queue_create("lanadb.scrcpy.titlebar.actions", DISPATCH_QUEUE_SERIAL);
     _statusQueue = dispatch_queue_create("lanadb.scrcpy.titlebar.status", DISPATCH_QUEUE_SERIAL);
     self.layoutAttribute = NSLayoutAttributeBottom;
@@ -496,6 +516,9 @@ enum {
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(mirrorStateChanged:)
         name:@"uk.agpt.lanadbmanager.mirror.state" object:nil];
+    [[NSDistributedNotificationCenter defaultCenter] addObserver:self
+        selector:@selector(themeChanged:)
+        name:@"uk.agpt.lanadbmanager.theme" object:nil];
     if (_appWindow) {
         // Home and Recents would open the launcher on the virtual display, so
         // they are left out; Back moves to the front of the button row. The
@@ -557,6 +580,7 @@ enum {
             return event;
         }
         if (event.type == NSEventTypeKeyDown && !event.isARepeat) {
+            sc_lanadb_flush_pending();
             NSArray *arguments = [@[@"input", @"keycombination"] arrayByAddingObjectsFromArray:combo];
             dispatch_async(strongSelf.actionQueue, ^{
                 [strongSelf runADB:arguments timeout:5];
@@ -569,6 +593,7 @@ enum {
 - (void)dealloc {
     if (self.keyMonitor) { [NSEvent removeMonitor:self.keyMonitor]; }
     [self.captureTimer invalidate];
+    [self.launchTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
 }
@@ -979,7 +1004,8 @@ enum {
                 NSString *target = info[@"recordTo"];
                 int format = [target.pathExtension.lowercaseString
                     isEqualToString:@"mkv"] ? LANADB_FORMAT_MKV : LANADB_FORMAT_MP4;
-                if (!lanadb_record_start(target.fileSystemRepresentation, format)) {
+                BOOL recordAudio = [info[@"recordAudio"] boolValue];
+                if (!lanadb_record_start(target.fileSystemRepresentation, format, recordAudio)) {
                     [self postAction:kind path:nil extra:@{@"finished": @"0", @"failed": @"1"}];
                     self.recordPending = NO;
                     [self endCaptureClock];
@@ -1124,12 +1150,46 @@ enum {
     [actionButton refreshAppearance];
 }
 
+- (NSColor *)accentColor {
+    return self.nativeTheme ? NSColor.systemBlueColor : NSColor.systemIndigoColor;
+}
+
+- (void)applyAppearanceMode:(NSString *)mode {
+    NSAppearance *appearance = nil;
+    if ([mode isEqualToString:@"light"]) {
+        appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    } else if ([mode isEqualToString:@"dark"]) {
+        appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    }
+    NSApp.appearance = appearance;
+    self.targetWindow.appearance = appearance;
+}
+
+- (void)themeChanged:(NSNotification *)notification {
+    NSDictionary *info = notification.userInfo;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *style = info[@"style"];
+        if (style.length) {
+            self.nativeTheme = [style isEqualToString:@"native"];
+        }
+        NSString *appearance = info[@"appearance"];
+        if (appearance.length) {
+            [self applyAppearanceMode:appearance];
+        }
+        [self updateButtons];
+        if (self.launchView) {
+            self.launchView.needsDisplay = YES;
+        }
+    });
+}
+
 - (void)updateButtons {
+    NSColor *accent = self.accentColor;
     BOOL recordingSelected = [self.captureKind isEqualToString:@"record"];
     BOOL gifSelected = [self.captureKind isEqualToString:@"gif"];
     [self setButton:SC_BUTTON_PIN symbol:self.pinned ? @"pin.fill" : @"pin"
               title:self.pinned ? @"已置顶，点击取消" : @"置顶窗口"
-             active:self.pinned color:NSColor.systemIndigoColor];
+             active:self.pinned color:accent];
     [self setButton:SC_BUTTON_BACK symbol:@"arrow.uturn.backward" title:@"后退" active:NO color:nil];
     [self setButton:SC_BUTTON_HOME symbol:@"house" title:@"首页" active:NO color:nil];
     [self setButton:SC_BUTTON_RECENTS symbol:@"square.on.square" title:@"最近任务" active:NO color:nil];
@@ -1139,23 +1199,23 @@ enum {
               title:!self.audioAvailable ? @"未播放设备声音，请在设置中开启" :
                     (self.musicMuted ? @"投屏已静音，点击恢复声音" : @"点击静音投屏声音")
              active:self.audioAvailable && !self.musicMuted && self.musicKnown
-              color:NSColor.systemIndigoColor];
+              color:accent];
     _buttons[SC_BUTTON_MUTE].enabled = self.audioAvailable;
     [self setButton:SC_BUTTON_SHADE
              symbol:self.shadeExpanded ? @"chevron.up" : @"chevron.down"
               title:self.shadeExpanded ? @"通知栏已展开，点击收起" : @"下拉通知栏"
-             active:self.shadeExpanded color:NSColor.systemIndigoColor];
+             active:self.shadeExpanded color:accent];
     [self setButton:SC_BUTTON_VOLUME_DOWN symbol:@"speaker.minus" title:@"降低音量" active:NO color:nil];
     [self setButton:SC_BUTTON_VOLUME_UP symbol:@"speaker.plus" title:@"提高音量" active:NO color:nil];
     [self setButton:SC_BUTTON_POWER
              symbol:self.screenKnown && !self.screenAwake ? @"lock.fill" : @"lock"
               title:!self.screenKnown ? @"锁屏或唤醒设备" :
                     (self.screenAwake ? @"锁屏（设备休眠，投屏画面会暂停）" : @"设备已锁屏，点击唤醒")
-             active:self.screenKnown && !self.screenAwake color:NSColor.systemIndigoColor];
+             active:self.screenKnown && !self.screenAwake color:accent];
     [self setButton:SC_BUTTON_SCREEN_OFF symbol:@"iphone.slash"
               title:self.displayOff ? @"设备屏幕已关闭，点击重新点亮" :
                                       @"关闭设备屏幕（投屏和操作继续）"
-             active:self.displayOff color:NSColor.systemIndigoColor];
+             active:self.displayOff color:accent];
     [self setButton:SC_BUTTON_SCREENSHOT
              symbol:self.screenshotSaving ? @"hourglass" : @"camera"
               title:self.screenshotSaving ? @"正在保存截图" : @"保存截图"
@@ -1204,6 +1264,7 @@ enum {
     task.executableURL = [NSURL fileURLWithPath:self.adbPath];
     task.arguments = [@[@"-s", self.serial, @"shell"] arrayByAddingObjectsFromArray:arguments];
     NSPipe *output = [NSPipe pipe];
+    NSFileHandle *reader = output.fileHandleForReading;
     task.standardOutput = output;
     task.standardError = [NSFileHandle fileHandleWithNullDevice];
     dispatch_semaphore_t finished = dispatch_semaphore_create(0);
@@ -1215,17 +1276,24 @@ enum {
     if (![task launchAndReturnError:&error]) {
         return nil;
     }
+    __block NSData *bytes = nil;
+    dispatch_semaphore_t readDone = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        bytes = [reader readDataToEndOfFile];
+        dispatch_semaphore_signal(readDone);
+    });
     dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
     if (dispatch_semaphore_wait(finished, deadline) != 0) {
         if (task.running) {
             [task terminate];
         }
+        [reader closeFile];
         return nil;
     }
-    if (task.terminationStatus != 0) {
+    dispatch_semaphore_wait(readDone, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+    if (task.terminationStatus != 0 || !bytes) {
         return nil;
     }
-    NSData *bytes = [output.fileHandleForReading readDataToEndOfFile];
     return [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
 }
 

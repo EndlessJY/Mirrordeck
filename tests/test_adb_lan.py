@@ -566,10 +566,6 @@ class NetworkScopeTests(AdbTestCase):
             command.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TransportKindTests(unittest.TestCase):
     def test_mdns_wireless_debugging_is_a_network_transport(self):
         serial = "adb-R5CT1234567-AbCdEf._adb-tls-connect._tcp"
@@ -577,6 +573,39 @@ class TransportKindTests(unittest.TestCase):
         self.assertTrue(adb_lan.is_network_transport(serial))
         self.assertTrue(adb_lan.is_network_transport("10.0.0.4:5555"))
         self.assertFalse(adb_lan.is_network_transport("d537dfe4"))
+
+    def test_scrcpy_commands_requests_unlimited_width_for_long_bundle_paths(self):
+        long_prefix = "/Users/tester/Library/Application Support/LAN ADB Manager/Mirrors/0123456789abcdef/Xiaomi 15 Pro.app"
+        ps_line = f"{long_prefix}/Contents/MacOS/scrcpy --serial=0123abcd --window-title=Xiaomi\n"
+        captured = []
+
+        def fake_run(args, **_kw):
+            captured.append(args)
+            return 0, ps_line
+
+        with patch.object(adb_lan, "run_command", side_effect=fake_run):
+            self.assertTrue(adb_lan.mirror_uses_serial("0123abcd"))
+            self.assertTrue(adb_lan.active_mirror_process())
+        self.assertIn("-axww", captured[0])
+
+    def test_emulator_listeners_detect_mumu12_16384_and_hd_player(self):
+        lsof = (
+            "MuMuVMM 4321 user 22u IPv4 0x1 0t0 TCP 127.0.0.1:16384 (LISTEN)\n"
+            "HD-Player 8765 user 30u IPv4 0x2 0t0 TCP *:5555 (LISTEN)\n"
+        )
+        listeners = adb_lan.parse_emulator_listeners(lsof)
+        self.assertEqual(listeners, {"127.0.0.1:16384": 4321, "127.0.0.1:5555": 8765})
+
+    def test_dynamic_device_info_suppresses_fake_tv_battery_and_skips_public_ip(self):
+        self.assertNotIn("public_ip", dict(adb_lan.DYNAMIC_INFO_COMMANDS))
+        parts = {
+            "characteristics": "tv",
+            "battery": "  level: 100\n  status: 5",
+            "uptime": "3600.0 100.0",
+        }
+        sections = {s["title"]: dict(s["items"]) for s in adb_lan.parse_device_info(parts)}
+        self.assertNotIn("电池", sections)
+        self.assertIn("系统", sections)
 
 
 class ServerRestartCooldownTests(AdbTestCase):
@@ -591,3 +620,7 @@ class ServerRestartCooldownTests(AdbTestCase):
             self.assertTrue(first.restart_server())
             self.assertFalse(second.restart_server())
         self.assertEqual(calls.count(("kill-server",)), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

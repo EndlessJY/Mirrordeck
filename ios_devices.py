@@ -44,10 +44,37 @@ def _format_bytes(value: Any) -> str:
     return ""
 
 
+async def _close(resource: Any) -> None:
+    if resource is None:
+        return
+    close = getattr(resource, "close", None)
+    if callable(close):
+        try:
+            await _value(close())
+        except Exception:
+            pass
+
+
 async def _lockdown(udid: str, autopair: bool):
     from pymobiledevice3.lockdown import create_using_usbmux
-    return await create_using_usbmux(serial=udid, autopair=autopair, label=LABEL,
-                                     connection_type="USB", pair_timeout=1)
+    return await asyncio.wait_for(
+        create_using_usbmux(serial=udid, autopair=autopair, label=LABEL,
+                            connection_type="USB", pair_timeout=1),
+        timeout=5.0,
+    )
+
+
+def _os_trace_service(client: Any):
+    from pymobiledevice3.services.os_trace import OsTraceService
+    return OsTraceService(lockdown=client)
+
+
+def _infer_device_class(values: dict) -> str:
+    explicit = str(values.get("DeviceClass") or "").strip()
+    if explicit:
+        return explicit
+    product = str(values.get("ProductType") or "")
+    return "iPad" if product.startswith("iPad") else "iPhone"
 
 
 def _trust_state(error: Exception) -> str:
@@ -63,24 +90,33 @@ def _trust_state(error: Exception) -> str:
     return "ios_unavailable"
 
 
+async def _read_all_values(client: Any) -> dict:
+    raw = client.all_values() if callable(getattr(client, "all_values", None)) else client.all_values
+    return await asyncio.wait_for(_value(raw), timeout=5.0) or {}
+
+
 async def _scan() -> tuple[list[dict], list[dict]]:
     from pymobiledevice3.usbmux import list_devices
     devices: list[dict] = []
     issues: list[dict] = []
     seen = set()
-    for mux in await list_devices():
+    mux_list = await asyncio.wait_for(list_devices(), timeout=5.0)
+    for mux in mux_list:
         if getattr(mux, "connection_type", "USB") != "USB" or mux.serial in seen:
             continue
         seen.add(mux.serial)
+        client = None
         try:
             # Untrusted devices get the "信任此电脑" prompt on their screen.
             client = await _lockdown(mux.serial, autopair=True)
-            values = await _value(client.all_values) if not callable(
-                getattr(client, "all_values", None)) else await _value(client.all_values())
+            values = await _read_all_values(client)
         except Exception as error:      # trust pending, locked, denied...
             issues.append({"serial": mux.serial, "state": _trust_state(error), "kind": "iPhone"})
             continue
-        name = values.get("DeviceName") or "iPhone"
+        finally:
+            await _close(client)
+        device_class = _infer_device_class(values)
+        name = values.get("DeviceName") or device_class
         devices.append({
             "identity": mux.serial,
             "platform": "ios",
@@ -89,7 +125,7 @@ async def _scan() -> tuple[list[dict], list[dict]]:
             "market_name": name,
             "tv": False,
             "emulator": False,
-            "device_class": values.get("DeviceClass", "iPhone"),
+            "device_class": device_class,
             "transports": [{"endpoint": mux.serial, "type": "USB", "label": "USB",
                             "state": "已连接"}],
             "wireless": False,
@@ -109,18 +145,21 @@ def scan() -> tuple[list[dict], list[dict]]:
 
 
 async def _info(udid: str) -> list[dict]:
-    client = await _lockdown(udid, autopair=False)
-    values = await _value(client.all_values) if not callable(
-        getattr(client, "all_values", None)) else await _value(client.all_values())
+    client = None
+    try:
+        client = await _lockdown(udid, autopair=False)
+        values = await _read_all_values(client)
 
-    async def domain(name: str) -> dict:
-        try:
-            return await _value(client.get_value(domain=name)) or {}
-        except Exception:
-            return {}
+        async def domain(name: str) -> dict:
+            try:
+                return await asyncio.wait_for(_value(client.get_value(domain=name)), timeout=4.0) or {}
+            except Exception:
+                return {}
 
-    battery = await domain("com.apple.mobile.battery")
-    disk = await domain("com.apple.disk_usage")
+        battery = await domain("com.apple.mobile.battery")
+        disk = await domain("com.apple.disk_usage")
+    finally:
+        await _close(client)
     sections: list[dict] = []
 
     def section(title: str, items: list[tuple[str, Any]]) -> None:
@@ -128,7 +167,7 @@ async def _info(udid: str) -> list[dict]:
         if kept:
             sections.append({"title": title, "items": kept})
 
-    device_class = values.get("DeviceClass", "iPhone")
+    device_class = _infer_device_class(values)
     section("概览", [
         ("名称", values.get("DeviceName")),
         ("品牌", "Apple"),
@@ -173,10 +212,20 @@ async def _info(udid: str) -> list[dict]:
 
 
 def info(udid: str) -> list[dict]:
-    return _run(_info(udid))
+    try:
+        return _run(_info(udid))
+    except Exception as error:
+        state = _trust_state(error)
+        if state == "ios_locked":
+            raise ValueError("请先解锁设备后再读取信息") from error
+        if state in ("ios_untrusted", "ios_denied"):
+            raise ValueError("请先在设备上点“信任”并输入锁屏密码") from error
+        if isinstance(error, asyncio.TimeoutError):
+            raise ValueError("读取苹果设备信息超时，请重试") from error
+        raise ValueError("无法读取苹果设备信息，请检查 USB 连接") from error
 
 
-_LEVELS = {0: "V", 1: "I", 2: "D", 16: "E", 17: "F"}
+_LEVELS = {0: "I", 1: "I", 2: "D", 16: "E", 17: "F"}
 
 
 def _level(entry) -> str:
@@ -188,7 +237,7 @@ def _level(entry) -> str:
         return "F"
     if name.startswith("DEBUG"):
         return "D"
-    if name.startswith("INFO"):
+    if name.startswith("INFO") or name.startswith("NOTICE"):
         return "I"
     return _LEVELS.get(value, "I")
 
@@ -198,14 +247,19 @@ def stream_syslog(udid: str, emit: Callable[[str], None]) -> None:
     reads both platforms the same way. Runs until the device goes away."""
 
     async def run() -> None:
-        from pymobiledevice3.services.os_trace import OsTraceService
-        client = await _lockdown(udid, autopair=False)
-        service = OsTraceService(lockdown=client)
-        async for entry in service.syslog():
-            stamp: datetime = entry.timestamp
-            process = (entry.filename or entry.image_name or "").rsplit("/", 1)[-1] or "?"
-            message = (entry.message or "").replace("\n", " ⏎ ")
-            emit(f"{stamp:%m-%d %H:%M:%S}.{stamp.microsecond // 1000:03d} "
-                 f"{entry.pid:5d} {entry.pid:5d} {_level(entry)} {process}: {message}")
+        client = None
+        service = None
+        try:
+            client = await _lockdown(udid, autopair=False)
+            service = _os_trace_service(client)
+            async for entry in service.syslog():
+                stamp: datetime = entry.timestamp
+                process = (entry.filename or entry.image_name or "").rsplit("/", 1)[-1] or "?"
+                message = (entry.message or "").replace("\n", " ⏎ ")
+                emit(f"{stamp:%m-%d %H:%M:%S}.{stamp.microsecond // 1000:03d} "
+                     f"{entry.pid:5d} {entry.pid:5d} {_level(entry)} {process}: {message}")
+        finally:
+            await _close(service)
+            await _close(client)
 
     _run(run())

@@ -57,8 +57,8 @@ enum DeviceActions {
         let folder = FileManager.default.temporaryDirectory
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
         for name in names where name.hasPrefix("lanadb-snapshot-") || name.hasPrefix("lanadb-poster-")
-            || name.hasPrefix("lanadb-gif-") || name.hasPrefix("lanadb-icon-") || name.hasPrefix("lan-adb-scrcpy-")
-            || name.hasPrefix("lan-adb-recording-") {
+            || name.hasPrefix("lanadb-gif-") || name.hasPrefix("lanadb-icon-") || name.hasPrefix("lanadb-ios-")
+            || name.hasPrefix("lan-adb-scrcpy-") || name.hasPrefix("lan-adb-recording-") {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
         }
     }

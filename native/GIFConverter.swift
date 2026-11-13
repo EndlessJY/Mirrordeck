@@ -447,6 +447,9 @@ final class FrameSource {
         let transform = track.preferredTransform
         let natural = track.naturalSize.applying(transform)
         let shown = CGSize(width: abs(natural.width), height: abs(natural.height))
+        guard shown.width >= 1, shown.height >= 1 else {
+            throw GIFConverter.Failure.invalidVideo
+        }
         let scale = min(1, Double(options.maxSide) / Double(max(shown.width, shown.height)))
         let width = max(2, Int((shown.width * scale / 2).rounded()) * 2)
         let height = max(2, Int((shown.height * scale / 2).rounded()) * 2)
@@ -494,12 +497,21 @@ final class FrameSource {
 
     /// The next frame (BGRA, tightly packed) and its time in seconds.
     func next() -> ([UInt8], Double)? {
-        while let sample = output.copyNextSampleBuffer() {
-            guard let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
-            let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-            return (Self.copyPixels(buffer, width: width, height: height), time)
+        while true {
+            var result: ([UInt8], Double)?
+            var exhausted = false
+            autoreleasepool {
+                guard let sample = output.copyNextSampleBuffer() else {
+                    exhausted = true
+                    return
+                }
+                guard let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
+                let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                result = (Self.copyPixels(buffer, width: width, height: height), time)
+            }
+            if let result { return result }
+            if exhausted { return nil }
         }
-        return nil
     }
 
     func finish() throws {
