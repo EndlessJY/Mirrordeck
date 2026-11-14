@@ -9,6 +9,7 @@
 void sc_audio_player_set_muted(bool muted);
 bool sc_lanadb_set_display_power(bool on);
 bool sc_lanadb_press_key(int keycode);
+bool sc_lanadb_tap_center(void);
 // LANADB: on-demand recording of single-app windows.
 bool lanadb_record_start(const char *filename, int format, bool audio);
 bool lanadb_record_stop(void);
@@ -530,6 +531,9 @@ enum {
         [self updateButtons];
         [self refreshDeviceState];
         [self showLaunchOverlay];
+        // Only Space here (see handleSpace:); the editing shortcuts stay on
+        // scrcpy's own path in this window.
+        [self installEditingShortcuts];
         return self;
     }
     [self updateLayout];
@@ -553,8 +557,19 @@ enum {
     self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:
             NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *event) {
         LANADBTitlebarController *strongSelf = weakSelf;
+        // A key with no window (posted to the app) belongs to the key window.
+        NSWindow *window = event.window ?: NSApp.keyWindow;
+        if (!strongSelf || window != strongSelf.targetWindow) {
+            return event;
+        }
+        if ([strongSelf handleSpace:event]) {
+            return nil;
+        }
+        if (strongSelf.appWindow) {
+            return event;
+        }
         // keycombination exists from Android 13; older devices keep scrcpy's path.
-        if (!strongSelf || event.window != strongSelf.targetWindow || strongSelf.sdkLevel < 33) {
+        if (strongSelf.sdkLevel < 33) {
             return event;
         }
         NSEventModifierFlags flags = event.modifierFlags &
@@ -588,6 +603,43 @@ enum {
         }
         return nil;
     }];
+}
+
+// LANADB: Space with no modifier pauses / plays a short video (a tap in the
+// middle of the screen), unless the phone's keyboard is up: then it is a
+// space typed into the text field. While the Mac input method is composing
+// (pinyin candidates), Space stays with it. Off with the arrow-key setting.
+- (BOOL)handleSpace:(NSEvent *)event {
+    const char *enabled = getenv("LANADB_ARROW_SWIPE");
+    if (!enabled || strcmp(enabled, "1") || event.keyCode != 49) {
+        return NO;
+    }
+    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    if (flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
+                 NSEventModifierFlagOption | NSEventModifierFlagShift)) {
+        return NO;
+    }
+    id client = NSTextInputContext.currentInputContext.client;
+    if ([client respondsToSelector:@selector(hasMarkedText)] && [client hasMarkedText]) {
+        return NO;
+    }
+    if (event.type == NSEventTypeKeyDown && !event.isARepeat) {
+        sc_lanadb_flush_pending();
+        NSLog(@"LANADB: space pressed");
+        dispatch_async(self.actionQueue, ^{
+            NSString *state = [self runADB:@[@"dumpsys", @"input_method"] timeout:3];
+            BOOL typing = [state containsString:@"mInputShown=true"];
+            NSLog(@"LANADB: space → %@", typing ? @"typed space (keyboard up)" : @"tap");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (typing) {
+                    sc_lanadb_press_key(62);   // KEYCODE_SPACE
+                } else {
+                    sc_lanadb_tap_center();
+                }
+            });
+        });
+    }
+    return YES;
 }
 
 - (void)dealloc {

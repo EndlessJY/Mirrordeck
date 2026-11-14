@@ -1652,8 +1652,8 @@ struct MirrorSettingsView: View {
                     Text("音频")
                 }
                 Section {
-                    Toggle("上下方向键滑动屏幕", isOn: $arrowSwipe)
-                        .help("在投屏窗口按 ↑ / ↓ 上下滑动屏幕，刷短视频时切换上一条或下一条；关闭后方向键按原样发送给设备")
+                    Toggle("键盘刷视频（↑↓ 切换、空格暂停）", isOn: $arrowSwipe)
+                        .help("在投屏窗口按 ↑ / ↓ 上下滑动屏幕，切换上一条或下一条短视频；按空格点按屏幕中央暂停或继续（手机键盘弹出时仍输入空格）。关闭后这些按键按原样发送给设备")
                 } header: {
                     Text("键盘")
                 }

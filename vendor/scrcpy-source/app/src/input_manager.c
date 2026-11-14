@@ -14,6 +14,9 @@
 #include "util/log.h"
 #include "util/sdl.h"
 
+// LANADB: the window's input manager, for the title bar's Space tap.
+static struct sc_input_manager *lanadb_input_manager;
+
 void
 sc_input_manager_init(struct sc_input_manager *im,
                       const struct sc_input_manager_params *params) {
@@ -50,6 +53,7 @@ sc_input_manager_init(struct sc_input_manager *im,
 
     im->disconnected = false;
     im->ime_composing = false;
+    lanadb_input_manager = im;
 }
 
 static void
@@ -466,6 +470,43 @@ static struct {
     SDL_TimerID timer;
 } lanadb_swipe_state;
 
+static void
+lanadb_swipe_touch(enum android_motionevent_action action, int32_t y);
+bool
+sc_lanadb_tap_center(void);
+
+static Uint32 SDLCALL
+lanadb_tap_release(void *userdata, SDL_TimerID timer, Uint32 interval) {
+    (void) userdata;
+    (void) timer;
+    (void) interval;
+    lanadb_swipe_touch(AMOTION_EVENT_ACTION_UP, lanadb_swipe_state.from_y);
+    lanadb_swipe_state.timer = 0;
+    return 0;
+}
+
+// LANADB: a short tap in the middle of the screen (Space: pause / play in
+// short-video apps). Called from the title bar on the main thread.
+bool
+sc_lanadb_tap_center(void) {
+    struct sc_input_manager *im = lanadb_input_manager;
+    if (!im || !im->controller || lanadb_swipe_state.timer) {
+        return false;
+    }
+    struct sc_size size = im->screen->frame_size;
+    if (!size.width || !size.height) {
+        return false;
+    }
+    lanadb_swipe_state.im = im;
+    lanadb_swipe_state.size = size;
+    lanadb_swipe_state.x = size.width / 2;
+    lanadb_swipe_state.from_y = size.height / 2;
+    lanadb_swipe_touch(AMOTION_EVENT_ACTION_DOWN, lanadb_swipe_state.from_y);
+    lanadb_swipe_state.timer = SDL_AddTimer(60, lanadb_tap_release, NULL);
+    LOGI("LANADB: space tap");
+    return true;
+}
+
 static bool
 lanadb_arrow_swipe_enabled(void) {
     const char *value = getenv("LANADB_ARROW_SWIPE");
@@ -511,6 +552,8 @@ lanadb_swipe(struct sc_input_manager *im, bool next) {
     struct sc_size size = im->screen->frame_size;
     if (lanadb_swipe_state.timer || !im->controller
             || !size.width || !size.height) {
+        LOGI("LANADB: swipe skipped (busy=%d, size=%ux%u)",
+             lanadb_swipe_state.timer != 0, size.width, size.height);
         return;
     }
     lanadb_swipe_state.im = im;
@@ -808,12 +851,23 @@ sc_input_manager_process_key(struct sc_input_manager *im,
 
     // LANADB: ↑ / ↓ without modifiers swipe the screen (previous / next item
     // in short-video apps, scrolling elsewhere) instead of sending D-pad keys.
-    if (lanadb_arrow_swipe_enabled() && !mod && !im->ime_composing
+    // Only real modifiers count: Caps Lock / Num Lock (also part of the
+    // modifier state) must not turn the swipe off.
+    uint16_t held = mod & (SDL_KMOD_CTRL | SDL_KMOD_SHIFT | SDL_KMOD_ALT | SDL_KMOD_GUI);
+    if (lanadb_arrow_swipe_enabled()
             && (sdl_keycode == SDLK_UP || sdl_keycode == SDLK_DOWN)) {
-        if (down && !repeat) {
-            lanadb_swipe(im, sdl_keycode == SDLK_DOWN);
+        if (!held && !im->ime_composing) {
+            if (down && !repeat) {
+                LOGI("LANADB: arrow swipe %s (mod=0x%04x)",
+                     sdl_keycode == SDLK_DOWN ? "next" : "previous", mod);
+                lanadb_swipe(im, sdl_keycode == SDLK_DOWN);
+            }
+            return;
         }
-        return;
+        if (down && !repeat) {
+            LOGI("LANADB: arrow key sent as a key (mod=0x%04x, composing=%d)",
+                 mod, im->ime_composing);
+        }
     }
 
     uint64_t ack_to_wait = SC_SEQUENCE_INVALID;
