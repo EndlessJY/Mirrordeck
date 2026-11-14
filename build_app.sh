@@ -64,7 +64,8 @@ webp=/opt/homebrew/opt/webp
   native/ADBManagerApp.swift native/Theme.swift native/MirrorStore.swift native/DeviceActions.swift \
   native/GIFConverter.swift native/WebPConverter.swift \
   native/AppWindows.swift native/AppPicker.swift native/DeviceLogs.swift \
-  native/IOSDevices.swift native/IOSMirror.swift
+  native/IOSDevices.swift native/IOSMirror.swift \
+  native/DevicePrefs.swift native/CaptureHistory.swift native/UpdateChecker.swift native/MenuBar.swift
 /bin/cp native/Info.plist "$app/Contents/Info.plist"
 # Reads app icons on the device for the app picker (run, then deleted there).
 /bin/cp android/icons/lanadb-icons.dex "$app/Contents/Resources/lanadb-icons.dex"

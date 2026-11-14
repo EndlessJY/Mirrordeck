@@ -425,6 +425,8 @@ enum {
 @property(nonatomic) BOOL appWindow;
 // The app shows its first page: Back asks for confirmation before closing.
 @property(nonatomic) BOOL appAtRoot;
+@property(nonatomic, strong) NSTimer *placeTimer;
+@property(nonatomic, strong) NSView *helpView;
 @property(nonatomic, strong) NSDate *rootBackAt;
 @property(nonatomic, strong) LANADBLaunchView *launchView;
 @property(nonatomic, strong) NSTimer *launchTimer;
@@ -512,6 +514,8 @@ enum {
     self.view = container;
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowDidResize:)
                                                  name:NSWindowDidResizeNotification object:window];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowDidMove:)
+                                                 name:NSWindowDidMoveNotification object:window];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowDidBecomeKey:)
                                                  name:NSWindowDidBecomeKeyNotification object:window];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
@@ -563,6 +567,16 @@ enum {
             return event;
         }
         if ([strongSelf handleSpace:event]) {
+            return nil;
+        }
+        NSEventModifierFlags held = event.modifierFlags & (NSEventModifierFlagCommand |
+            NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift);
+        if (event.keyCode == 44 && held == NSEventModifierFlagCommand) {      // ⌘/
+            if (event.type == NSEventTypeKeyDown && !event.isARepeat) { [strongSelf toggleHelp]; }
+            return nil;
+        }
+        if (strongSelf.helpView && event.keyCode == 53) {                     // Esc
+            if (event.type == NSEventTypeKeyDown) { [strongSelf toggleHelp]; }
             return nil;
         }
         if (strongSelf.appWindow) {
@@ -1023,6 +1037,11 @@ enum {
         NSString *kind = info[@"kind"];
         NSString *message = info[@"message"] ?: @"";
         BOOL success = [info[@"success"] boolValue];
+        if ([kind isEqualToString:@"arrange"]) {
+            [self fitIntoRect:NSMakeRect([info[@"x"] doubleValue], [info[@"y"] doubleValue],
+                                         [info[@"w"] doubleValue], [info[@"h"] doubleValue])];
+            return;
+        }
         if ([kind isEqualToString:@"appRoot"]) {
             self.appAtRoot = [info[@"root"] boolValue];
             if (!self.appAtRoot) { self.rootBackAt = nil; }
@@ -1100,6 +1119,162 @@ enum {
 - (void)windowDidResize:(NSNotification *)notification {
     (void) notification;
     [self updateLayout];
+    [self layoutHelp];
+    [self schedulePlaceReport];
+}
+
+- (void)windowDidMove:(NSNotification *)notification {
+    (void) notification;
+    [self schedulePlaceReport];
+}
+
+// LANADB: the app remembers where this window was left (per device, per app)
+// and opens it there next time. Reported a moment after moving stops, in
+// scrcpy's terms: the picture area from the top-left of the main display.
+- (void)schedulePlaceReport {
+    [self.placeTimer invalidate];
+    __weak LANADBTitlebarController *weakSelf = self;
+    self.placeTimer = [NSTimer scheduledTimerWithTimeInterval:0.6 repeats:NO block:^(NSTimer *timer) {
+        (void) timer;
+        [weakSelf reportPlace];
+    }];
+}
+
+- (void)reportPlace {
+    NSWindow *window = self.targetWindow;
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (!window || !primary || (window.styleMask & NSWindowStyleMaskFullScreen)) { return; }
+    NSRect content = [NSWindow contentRectForFrameRect:window.frame styleMask:window.styleMask];
+    // The tool rows are added after scrcpy places the window, which moves its
+    // top up by their height; add it back so the window reopens in place.
+    CGFloat tools = MAX(0, NSHeight(content) - NSHeight(window.contentView.frame));
+    long x = lround(content.origin.x);
+    long y = lround(NSMaxY(primary.frame) - NSMaxY(content) + tools);
+    [self postAction:@"geometry" path:nil extra:@{
+        @"x": [NSString stringWithFormat:@"%ld", x],
+        @"y": [NSString stringWithFormat:@"%ld", y],
+        @"w": [NSString stringWithFormat:@"%ld", lround(content.size.width)],
+        @"h": [NSString stringWithFormat:@"%ld", lround(content.size.height)],
+    }];
+}
+
+// LANADB: "并排排列投屏窗口" — fill the given screen area as far as the
+// picture's proportions allow, top-aligned and centred.
+- (void)fitIntoRect:(NSRect)rect {
+    NSWindow *window = self.targetWindow;
+    NSView *content = window.contentView;
+    if (!window || !content || content.frame.size.height <= 0) { return; }
+    if (window.styleMask & NSWindowStyleMaskFullScreen) { return; }
+    CGFloat chrome = window.frame.size.height - content.frame.size.height;
+    CGFloat ratio = content.frame.size.width / content.frame.size.height;
+    CGFloat height = rect.size.height - chrome;
+    CGFloat width = height * ratio;
+    if (width > rect.size.width) {
+        width = rect.size.width;
+        height = width / ratio;
+    }
+    NSRect frame = NSMakeRect(round(NSMidX(rect) - width / 2), round(NSMaxY(rect) - height - chrome),
+                              round(width), round(height + chrome));
+    [window setFrame:frame display:YES animate:YES];
+}
+
+// LANADB: ⌘/ shows the keyboard shortcuts over the picture.
+- (NSArray<NSArray<NSString *> *> *)shortcutRows {
+    NSMutableArray *rows = [NSMutableArray array];
+    const char *swipe = getenv("LANADB_ARROW_SWIPE");
+    if (swipe && !strcmp(swipe, "1")) {
+        [rows addObject:@[@"↑ / ↓", @"上一条 / 下一条（上下滑动）"]];
+        [rows addObject:@[@"空格", @"暂停 / 继续（点按屏幕中央）"]];
+    }
+    [rows addObject:@[@"⌘B", @"返回"]];
+    if (!self.appWindow) {
+        [rows addObject:@[@"⌘H", @"主屏幕"]];
+        [rows addObject:@[@"⌘S", @"多任务"]];
+    }
+    [rows addObjectsFromArray:@[
+        @[@"⌘↑ / ⌘↓", @"音量加 / 减"],
+        @[@"⌘N", @"下拉通知栏"],
+        @[@"⌘P", @"电源键（锁屏 / 亮屏）"],
+        @[@"⌘R", @"旋转屏幕"],
+        @[@"⌘V", @"粘贴 Mac 剪贴板"],
+        @[@"⌘A ⌘C ⌘X ⌘Z", @"全选、复制、剪切、撤销"],
+        @[@"拖入 APK", @"安装到手机"],
+        @[@"拖入其他文件", @"传到手机“下载”文件夹"],
+        @[@"⌘/", @"显示或隐藏本说明"],
+    ]];
+    return rows;
+}
+
+- (void)toggleHelp {
+    if (self.helpView) {
+        NSView *view = self.helpView;
+        self.helpView = nil;
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.18;
+            view.animator.alphaValue = 0;
+        } completionHandler:^{ [view removeFromSuperview]; }];
+        return;
+    }
+    NSView *content = self.targetWindow.contentView;
+    if (!content) { return; }
+    NSStackView *list = [[NSStackView alloc] init];
+    list.orientation = NSUserInterfaceLayoutOrientationVertical;
+    list.alignment = NSLayoutAttributeLeading;
+    list.spacing = 7;
+    NSTextField *title = [NSTextField labelWithString:@"快捷键"];
+    title.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
+    title.textColor = NSColor.whiteColor;
+    [list addArrangedSubview:title];
+    for (NSArray<NSString *> *row in [self shortcutRows]) {
+        NSTextField *key = [NSTextField labelWithString:row[0]];
+        key.font = [NSFont monospacedSystemFontOfSize:12.5 weight:NSFontWeightSemibold];
+        key.textColor = NSColor.whiteColor;
+        [key.widthAnchor constraintEqualToConstant:118].active = YES;
+        NSTextField *what = [NSTextField labelWithString:row[1]];
+        what.font = [NSFont systemFontOfSize:12.5];
+        what.textColor = [NSColor colorWithWhite:1 alpha:0.78];
+        NSStackView *line = [NSStackView stackViewWithViews:@[key, what]];
+        line.spacing = 10;
+        [list addArrangedSubview:line];
+    }
+    NSTextField *hint = [NSTextField labelWithString:@"点按任意处关闭"];
+    hint.font = [NSFont systemFontOfSize:11];
+    hint.textColor = [NSColor colorWithWhite:1 alpha:0.5];
+    [list addArrangedSubview:hint];
+
+    LANADBThumbnailView *panel = [[LANADBThumbnailView alloc] initWithFrame:NSZeroRect];
+    __weak LANADBTitlebarController *weakSelf = self;
+    panel.onClick = ^{ [weakSelf toggleHelp]; };
+    panel.wantsLayer = YES;
+    panel.layer.backgroundColor = [NSColor colorWithWhite:0.08 alpha:0.86].CGColor;
+    panel.layer.cornerRadius = 14;
+    list.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel addSubview:list];
+    [NSLayoutConstraint activateConstraints:@[
+        [list.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:20],
+        [list.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-20],
+        [list.topAnchor constraintEqualToAnchor:panel.topAnchor constant:16],
+        [list.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-14],
+    ]];
+    NSSize size = panel.fittingSize;
+    panel.frame = NSMakeRect(0, 0, size.width, size.height);
+    panel.alphaValue = 0;
+    [content addSubview:panel positioned:NSWindowAbove relativeTo:nil];
+    self.helpView = panel;
+    [self layoutHelp];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.18;
+        panel.animator.alphaValue = 1;
+    } completionHandler:nil];
+}
+
+- (void)layoutHelp {
+    NSView *panel = self.helpView;
+    NSView *content = self.targetWindow.contentView;
+    if (!panel || !content) { return; }
+    NSRect bounds = content.bounds;
+    panel.frameOrigin = NSMakePoint(round(NSMidX(bounds) - panel.frame.size.width / 2),
+                                    MAX(8, round(NSMidY(bounds) - panel.frame.size.height / 2)));
 }
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
@@ -1577,6 +1752,33 @@ lanadb_apply_gamut(NSWindow *window) {
     CGColorSpaceRelease(space);
 }
 
+// LANADB: the window's title bar, for notices from C code (dropped files).
+static __weak LANADBTitlebarController *lanadb_active_titlebar;
+
+// LANADB: a file dropped on the window — phase 0 when it starts, 1 when done.
+void
+sc_lanadb_file_event(int phase, bool apk, const char *file, bool ok) {
+    NSString *name = file ? [[NSString stringWithUTF8String:file] lastPathComponent] : @"";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LANADBTitlebarController *controller = lanadb_active_titlebar;
+        if (!controller) { return; }
+        if (phase == 0) {
+            [controller showNotice:[NSString stringWithFormat:apk ? @"正在安装 %@…" : @"正在传送 %@…", name]
+                            symbol:apk ? @"arrow.down.app" : @"arrow.up.doc"
+                             color:NSColor.whiteColor duration:120];
+        } else if (ok) {
+            [controller showNotice:apk ? [NSString stringWithFormat:@"已安装 %@", name] :
+                                         @"已传到手机“下载”文件夹"
+                            symbol:@"checkmark.circle.fill" color:NSColor.systemGreenColor duration:2.2];
+        } else {
+            [controller showNotice:apk ? @"安装失败，请在手机上查看是否需要确认" :
+                                         @"传送失败，请检查手机存储空间"
+                            symbol:@"exclamationmark.triangle.fill" color:NSColor.systemYellowColor
+                          duration:3];
+        }
+    });
+}
+
 void
 sc_macos_titlebar_install(SDL_Window *window) {
     const char *serial = getenv("LANADB_SERIAL");
@@ -1596,6 +1798,7 @@ sc_macos_titlebar_install(SDL_Window *window) {
               serial:[NSString stringWithUTF8String:serial]
              adbPath:[NSString stringWithUTF8String:adb]];
     [nativeWindow addTitlebarAccessoryViewController:controller];
+    lanadb_active_titlebar = controller;
     if (!controller.appWindow) {
         [nativeWindow addTitlebarAccessoryViewController:controller.navigationAccessory];
     }
@@ -1610,6 +1813,15 @@ sc_macos_titlebar_install(SDL_Window *window) {
         [nativeWindow makeKeyAndOrderFront:nil];
         [controller postAction:@"ready"];
         lanadb_apply_gamut(nativeWindow);
+        // The first mirrors after installing point at the shortcut sheet once.
+        const char *tip = getenv("LANADB_SHORTCUT_TIP");
+        if (tip && !strcmp(tip, "1")) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [controller showNotice:@"按 ⌘/ 查看快捷键" symbol:@"keyboard"
+                                 color:NSColor.whiteColor duration:3.5];
+            });
+        }
         // The renderer may (re)create its layer after the first frame.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ lanadb_apply_gamut(nativeWindow); });

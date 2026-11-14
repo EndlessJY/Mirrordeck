@@ -106,7 +106,7 @@ struct ADBReport: Codable {
                                $0.state == "ios_locked" ? "请解锁 iPhone，然后在弹出的提示中点“信任”" :
                                $0.state == "ios_denied" ? "已在 iPhone 上选择“不信任”；重新插拔数据线后再试" :
                                $0.state == "ios_unavailable" ? "暂时无法读取这台 iPhone，请重新插拔数据线" : $0.state,
-                      detail: "", source: $0.kind ?? "USB", endpoint: nil)
+                      detail: "", source: $0.kind ?? "USB", endpoint: nil, state: $0.state)
         }
         let pairItems = pairing.map {
             IssueItem(id: "pair:" + $0.endpoint, title: $0.endpoint,
@@ -126,6 +126,53 @@ struct IssueItem: Identifiable {
     let detail: String
     let source: String
     let endpoint: String?
+    /// The USB / iPhone state behind the item ("unauthorized", "ios_locked"…).
+    var state: String? = nil
+
+    /// What to do, step by step, in the words of the phone's own settings.
+    var steps: [String] {
+        if id.hasPrefix("pair:") {
+            return ["在手机上打开“设置 › 开发者选项 › 无线调试”，点“使用配对码配对设备”。",
+                    "点下方“输入配对码”，填入手机上显示的 6 位数字。",
+                    "配对成功后，以后同一网络下会自动连接。"]
+        }
+        switch state {
+        case "unauthorized":
+            return ["解锁手机，屏幕上会出现“允许 USB 调试吗？”。",
+                    "勾选“一律允许这台计算机进行调试”，再点“允许”。",
+                    "没有弹出时，重新插拔数据线；仍不出现就在“开发者选项”里点“撤销 USB 调试授权”后再插。"]
+        case "offline":
+            return ["解锁手机屏幕。", "重新插拔数据线，或换一个 USB 口 / 数据线。",
+                    "仍离线时，在“开发者选项”里关闭再打开“USB 调试”。"]
+        case "no_lan_ip":
+            return ["让手机连上与这台 Mac 相同的 Wi-Fi，幕台会自动开启无线连接。",
+                    "只用 USB 时可以忽略这条，USB 投屏不受影响。"]
+        case "tcpip_unreachable":
+            return ["确认手机和 Mac 连的是同一个 Wi-Fi。",
+                    "公司、学校或酒店的 Wi-Fi 常禁止设备互访（AP 隔离），这种网络下请继续用 USB，或让 Mac 连手机热点。"]
+        case "ios_locked":
+            return ["解锁 iPhone。", "在弹出的“要信任此电脑吗？”中点“信任”，并输入锁屏密码。"]
+        case "ios_untrusted":
+            return ["在 iPhone 上点“信任”，并输入锁屏密码。", "没有弹出时重新插拔数据线。"]
+        case "ios_denied":
+            return ["拔下数据线再插回，iPhone 会再次询问。", "这次点“信任”。",
+                    "仍不询问时：iPhone“设置 › 通用 › 传输或还原 iPhone › 还原 › 还原位置与隐私”后再插。"]
+        case "ios_unavailable":
+            return ["重新插拔数据线，确认 iPhone 已解锁。", "仍不行时重启 iPhone 后再试。"]
+        case .some:
+            return ["解锁手机并重新插拔数据线。"]
+        case .none:
+            return ["确认设备已开机，并与这台 Mac 在同一网络。",
+                    "在手机“开发者选项”里打开“无线调试”（或用 USB 连接一次，幕台会自动开启无线 ADB）。",
+                    "点“重新连接”；这个地址不再使用时点“忽略此地址”。"]
+        }
+    }
+
+    /// The steps need USB debugging (Android over USB or a network address).
+    var needsDeveloperOptions: Bool {
+        guard let state else { return !id.hasPrefix("pair:") }
+        return !state.hasPrefix("ios_") && state != "no_lan_ip" && state != "tcpip_unreachable"
+    }
 
     /// Pairing waits for the user (blue); other items need attention (orange).
     var symbol: String {
@@ -377,7 +424,27 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
 }
 
 final class DeviceStore: ObservableObject {
-    @Published var report: ADBReport?
+    /// One store for the main window and the menu bar.
+    static let shared = DeviceStore()
+    @Published var report: ADBReport? {
+        didSet { autoMirrorNewDevices() }
+    }
+    /// Devices connected at the last update, to notice newly connected ones.
+    private var connectedBefore = Set<String>()
+
+    /// Devices set to "连接后自动投屏" start mirroring when they connect
+    /// (or are already connected when the app opens).
+    private func autoMirrorNewDevices() {
+        let connected = report?.devices.filter(\.connected) ?? []
+        let ids = Set(connected.map(\.identity))
+        defer { connectedBefore = ids }
+        for device in connected where !connectedBefore.contains(device.identity)
+            && DevicePrefsStore.shared.prefs(for: device.identity).autoMirror {
+            let live = device.isApple ? IOSMirrorStore.shared.open.contains(device.id) :
+                MirrorStore.shared.sessions[device.id] != nil
+            if !live { MenuBarActions.mirror(device) }
+        }
+    }
     @Published var selectedID: String?
     @Published var scanning = false
     /// False until the first full scan after launch has finished; devices
@@ -992,11 +1059,57 @@ struct DeviceDetail: View {
     @AppStorage("mirror.audioBitrateKbps") private var audioBitrateKbps = 128
     @AppStorage("mirror.videoCodec") private var videoCodec = "h265"
 
+    /// Settings with this device's own choices on top (the AppStorage values
+    /// above keep this view current when Settings change).
     private var mirrorOptions: MirrorOptions {
-        MirrorOptions(audio: audioEnabled,
-                      maxSize: maxSize, maxFPS: maxFPS,
-                      videoBitrateMbps: videoBitrateMbps,
-                      audioBitrateKbps: audioBitrateKbps, videoCodec: videoCodec)
+        _ = (audioEnabled, maxSize, maxFPS, videoBitrateMbps, audioBitrateKbps, videoCodec, prefs.all)
+        return MirrorOptions.current(for: device)
+    }
+
+    @ObservedObject private var prefs = DevicePrefsStore.shared
+
+    /// This device's own mirror settings, next to the mirror button.
+    private var deviceOptionsMenu: some View {
+        let current = prefs.prefs(for: device.identity)
+        let binding = { (keyPath: WritableKeyPath<DevicePrefs, Int?>) in
+            Binding<Int>(get: { current[keyPath: keyPath] ?? -1 },
+                         set: { value in prefs.update(device.identity) { $0[keyPath: keyPath] = value < 0 ? nil : value } })
+        }
+        return Menu {
+            if !device.isApple {
+                Picker("清晰度", selection: binding(\.maxSize)) {
+                    Text("跟随设置（\(maxSize == 0 ? "原始" : "\(maxSize)")）").tag(-1)
+                    Text("1280").tag(1280)
+                    Text("1920").tag(1920)
+                    Text("原始分辨率").tag(0)
+                }
+                Picker("帧率", selection: binding(\.maxFPS)) {
+                    Text("跟随设置（\(maxFPS)）").tag(-1)
+                    Text("30 帧").tag(30)
+                    Text("60 帧").tag(60)
+                    Text("120 帧").tag(120)
+                }
+                Picker("设备声音", selection: Binding<Int>(
+                    get: { current.audio.map { $0 ? 1 : 0 } ?? -1 },
+                    set: { value in prefs.update(device.identity) { $0.audio = value < 0 ? nil : value == 1 } })) {
+                    Text("跟随设置（\(audioEnabled ? "播放" : "不播放")）").tag(-1)
+                    Text("播放").tag(1)
+                    Text("不播放").tag(0)
+                }
+                Divider()
+            }
+            Toggle("连接后自动投屏", isOn: Binding(
+                get: { current.autoMirror },
+                set: { value in prefs.update(device.identity) { $0.autoMirror = value } }))
+            Button("恢复窗口默认位置") { WindowPlaces.forget(device.identity) }
+                .disabled(!WindowPlaces.has(device.identity))
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("这台设备的投屏选项：清晰度、帧率、声音、自动投屏")
     }
 
     private enum MirrorState: Equatable { case idle, starting, live }
@@ -1081,6 +1194,7 @@ struct DeviceDetail: View {
                 Spacer(minLength: 12)
                 tools
                 mirrorControl
+                deviceOptionsMenu
             }
             .padding(18)
             .background(
@@ -1105,6 +1219,7 @@ struct DeviceDetail: View {
                 Spacer(minLength: 12)
                 tools
                 mirrorControl
+                deviceOptionsMenu
             }
         }
     }
@@ -1588,6 +1703,12 @@ struct MirrorSettingsView: View {
     @AppStorage(RecordingSettings.animatedFormatKey) private var animatedFormat = "webp"
     @AppStorage(DeviceStore.subnetScanKey) private var subnetScan = false
     @AppStorage(MirrorStore.arrowSwipeKey) private var arrowSwipe = true
+    @AppStorage(PhoneSettings.stayAwakeKey) private var stayAwake = true
+    @AppStorage(PhoneSettings.lockOnCloseKey) private var lockOnClose = false
+    @AppStorage(PhoneSettings.quietRecordingKey) private var quietRecording = true
+    @AppStorage(MenuBarSettings.showKey) private var showMenuBar = true
+    @AppStorage(UpdateChecker.autoKey) private var autoUpdateCheck = true
+    @ObservedObject private var updates = UpdateChecker.shared
 
     private var saveURL: URL { DeviceActions.saveDirectoryURL(saveDirectory) }
 
@@ -1658,6 +1779,14 @@ struct MirrorSettingsView: View {
                     Text("键盘")
                 }
                 Section {
+                    Toggle("投屏时保持手机亮屏", isOn: $stayAwake)
+                        .help("投屏期间手机屏幕不会自动熄灭；结束后恢复手机原来的熄屏时间")
+                    Toggle("结束投屏后锁定手机", isOn: $lockOnClose)
+                        .help("关闭投屏窗口时让手机熄屏锁定")
+                } header: {
+                    Text("手机")
+                }
+                Section {
                     Toggle("定时刷新设备", isOn: $subnetScan)
                 } header: {
                     Text("发现设备")
@@ -1696,6 +1825,8 @@ struct MirrorSettingsView: View {
                         Text("MKV（录制意外中断时文件仍可用）").tag("mkv")
                     }
                     Toggle("录制设备声音", isOn: $recordAudio)
+                    Toggle("录制时开启手机勿扰", isOn: $quietRecording)
+                        .help("录屏和录制动图期间开启 Android 手机的勿扰模式，避免把通知录进去；录完恢复（原本已开勿扰则不变）")
                 }
                 Section {
                     if theme.isAppleNative {
@@ -1758,6 +1889,35 @@ struct MirrorSettingsView: View {
             .formStyle(.grouped)
             .frame(minHeight: 380)
             .tabItem { Label("外观", systemImage: "paintbrush") }
+
+            Form {
+                Section {
+                    Toggle("在菜单栏显示幕台", isOn: $showMenuBar)
+                        .help("从菜单栏直接投屏、截图、打开日志；关闭主窗口后幕台仍在菜单栏运行")
+                }
+                Section {
+                    LabeledContent("当前版本", value: UpdateChecker.isLocalBuild ?
+                                   "\(UpdateChecker.currentVersion)（本机构建）" : UpdateChecker.currentVersion)
+                    Toggle("自动检查更新", isOn: $autoUpdateCheck)
+                        .help("每天最多一次，读取 GitHub 上的最新版本信息；不会自动下载或安装")
+                    HStack {
+                        if let release = updates.available {
+                            Button("下载新版本 \(release.version)") { NSWorkspace.shared.open(release.page) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        Button(updates.checking ? "正在检查…" : "立即检查") { updates.check() }
+                            .disabled(updates.checking)
+                        if let status = updates.status {
+                            Text(status).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("更新")
+                }
+            }
+            .formStyle(.grouped)
+            .frame(minHeight: 300)
+            .tabItem { Label("通用", systemImage: "gearshape") }
         }
         .tint(Theme.accent)
         .frame(width: 540)
@@ -1897,6 +2057,47 @@ struct IssueDetail: View {
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                Card(title: "怎么做") {
+                    VStack(alignment: .leading, spacing: 9) {
+                        ForEach(Array(issue.steps.enumerated()), id: \.offset) { index, step in
+                            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                                Text("\(index + 1)")
+                                    .font(.caption.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(.white)
+                                    .frame(width: 18, height: 18)
+                                    .background(Circle().fill(Theme.accent))
+                                Text(step).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if issue.needsDeveloperOptions {
+                            DisclosureGroup("找不到“开发者选项”？") {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    ForEach(IssueItem.developerOptionsHelp, id: \.0) { brand, path in
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Text(brand).fontWeight(.medium).frame(width: 92, alignment: .leading)
+                                            Text(path).foregroundStyle(.secondary)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                    }
+                                    Text("连续点按 7 次后会提示“您已处于开发者模式”，再到“设置”中找“开发者选项”，打开“USB 调试”。")
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .font(.callout)
+                                .padding(.top, 6)
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if issue.endpoint == nil {
+                    Button("重新查找设备") { DeviceStore.shared.scanNetwork() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .tint(Theme.accent)
+                }
                 if let endpoint = issue.endpoint {
                     HStack(spacing: 10) {
                         if issue.id.hasPrefix("pair:") {
@@ -2014,7 +2215,9 @@ struct ActionSheetView: View {
 
 struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
-    @StateObject private var store = DeviceStore()
+    @ObservedObject private var store = DeviceStore.shared
+    @ObservedObject private var updates = UpdateChecker.shared
+    @State private var showingHistory = false
     @ObservedObject private var theme = ThemeStore.shared
     @State private var activeSheet: ActionRequest?
     /// The sidebar stays closed until the first scan has a result, then
@@ -2127,11 +2330,23 @@ struct ContentView: View {
             .navigationTitle("幕台")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
+                    Button { showingHistory.toggle() } label: {
+                        Label("最近捕获", systemImage: "photo.stack")
+                    }
+                    .help("最近的截图、录屏和动图，可直接拖进聊天窗口")
+                    .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
+                        CaptureHistoryView()
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button { openSettings() } label: {
                         Label("设置", systemImage: "gearshape")
                     }
                     .help("设置（⌘,）")
                 }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .showCaptureHistory)) { _ in
+                showingHistory = true
             }
             .safeAreaInset(edge: .bottom) {
                 if store.report != nil || store.error != nil {
@@ -2178,6 +2393,16 @@ struct ContentView: View {
                 .lineLimit(1)
                 .contentTransition(.opacity)
             Spacer()
+            if let release = updates.available {
+                Button {
+                    NSWorkspace.shared.open(release.page)
+                } label: {
+                    Label("新版本 \(release.version)", systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.accent)
+                .help("打开 GitHub 下载新版本")
+            }
             Button {
                 store.scanNetwork()
             } label: {
@@ -2201,16 +2426,31 @@ struct ContentView: View {
 struct LANADBManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    /// Not @AppStorage: an AppStorage here re-evaluates the whole app (and
+    /// rebuilds the main menu) on every defaults write, which loops.
+    @StateObject private var menuBar = MenuBarSettings.shared
+
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "main") {
             ContentView()
         }
         .windowStyle(.titleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .windowArrangement) {
+                Button("并排排列投屏窗口") { MirrorStore.shared.arrangeAllWindows() }
+                    .keyboardShortcut("a", modifiers: [.command, .option])
+            }
         }
         Settings {
             MirrorSettingsView()
+        }
+        // Written back only when it really changes: SwiftUI sets this binding
+        // on every update, and an unconditional write loops forever.
+        MenuBarExtra("幕台", systemImage: "rectangle.portrait.on.rectangle.portrait", isInserted: Binding(
+            get: { menuBar.shown },
+            set: { value in if value != menuBar.shown { menuBar.shown = value } })) {
+            MenuBarContent()
         }
     }
 }
@@ -2218,12 +2458,14 @@ struct LANADBManagerApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         ThemeStore.shared.applyAppearance()
+        UpdateChecker.shared.checkIfDue()
         // iPhones then appear as capture devices by the time one is mirrored.
         IOSMirrorStore.enableScreenCaptureDevices()
         DispatchQueue.global(qos: .utility).async { DeviceActions.removeTemporaryFiles() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        PhoneQuiet.endAll()
         MirrorStore.shared.stopAll()
         IOSMirrorStore.shared.stopAll()
         AppWindowStore.shared.closeAll()
@@ -2235,6 +2477,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// and a capture may still be saving. Otherwise the app keeps running and
     /// quits once the last of them ends with no window left open.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // With the menu bar icon, the app keeps running there.
+        if MenuBarSettings.show { return false }
         if Self.busy {
             NSLog("幕台：主窗口已关闭，仍有投屏或录制，继续运行")
             watchUntilIdle()

@@ -328,6 +328,9 @@ final class AppWindowStore: ObservableObject {
             "--prefer-text",
         ]
         if options.maxSize > 0 { arguments.append("--max-size=\(options.maxSize)") }
+        if PhoneSettings.stayAwake { arguments.append("--screen-off-timeout=1800") }
+        // Where this app's window was last left on this device.
+        arguments += WindowPlaces.arguments(key)
         // AAC allows single-app MP4 recordings to mux live audio playable in chat apps.
         // While the main mirror carries the device's sound (this app's included),
         // the window does not capture it again: see mainMirrorCapturesAudio.

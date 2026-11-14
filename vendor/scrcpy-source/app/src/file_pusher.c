@@ -131,6 +131,10 @@ request_scan_file(struct sc_file_pusher *fp) {
     return true;
 }
 
+// LANADB: progress for the title bar (sys/macos/titlebar.m).
+void
+sc_lanadb_file_event(int phase, bool apk, const char *file, bool ok);
+
 static int
 run_file_pusher(void *data) {
     struct sc_file_pusher *fp = data;
@@ -159,7 +163,9 @@ run_file_pusher(void *data) {
 
         if (req.action == SC_FILE_PUSHER_ACTION_INSTALL_APK) {
             LOGI("Installing %s...", req.file);
+            sc_lanadb_file_event(0, true, req.file, true);
             bool ok = sc_adb_install(intr, serial, req.file, 0);
+            sc_lanadb_file_event(1, true, req.file, ok);
             if (ok) {
                 LOGI("%s successfully installed", req.file);
             } else {
@@ -167,7 +173,9 @@ run_file_pusher(void *data) {
             }
         } else {
             LOGI("Pushing %s...", req.file);
+            sc_lanadb_file_event(0, false, req.file, true);
             bool ok = sc_adb_push(intr, serial, req.file, push_target, 0);
+            sc_lanadb_file_event(1, false, req.file, ok);
             if (ok) {
                 LOGI("%s successfully pushed to %s", req.file, push_target);
                 request_scan_file(fp); // any error already logged

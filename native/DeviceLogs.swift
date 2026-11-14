@@ -142,6 +142,9 @@ final class DeviceLogStore: ObservableObject {
 
     init(device: ADBDevice) {
         self.device = device
+        // An iPhone logs some 16,000 lines a second, mostly debug: start at
+        // Info so the window keeps more than a few seconds that matter.
+        if device.isApple { minimum = .info }
     }
 
     func updateDevice(_ updated: ADBDevice) {

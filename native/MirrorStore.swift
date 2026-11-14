@@ -249,6 +249,7 @@ final class MirrorStore: ObservableObject {
                                          fallback: fallback, title: appWindowTitles[id],
                                          frameOnly: appWindowTitles[id] != nil) { [weak self] url, error in
                 if let url {
+                    CaptureHistory.shared.add(url)
                     self?.messages[id] = nil
                     self?.errors[id] = nil
                     // The mirror shows a thumbnail (click reveals the file); Finder
@@ -265,6 +266,12 @@ final class MirrorStore: ObservableObject {
                     self?.notifyMirror(id: id, kind: "screenshot",
                                        success: false, message: error ?? "截图失败。")
                 }
+            }
+        case "geometry":
+            // The window moved or was resized: remember it for next time.
+            let value = { (key: String) in Int(notification.userInfo?[key] as? String ?? "") }
+            if let x = value("x"), let y = value("y"), let width = value("w"), let height = value("h") {
+                WindowPlaces.save(id, x: x, y: y, width: width, height: height)
             }
         case "ready":
             if var current = sessions[id] {
@@ -312,10 +319,12 @@ final class MirrorStore: ObservableObject {
     private func notifyMirror(id: String, kind: String, success: Bool, message: String,
                               recording: Bool? = nil, path: String? = nil,
                               thumb: String? = nil, recordTo: String? = nil,
-                              recordAudio: Bool? = nil, copied: Bool = false) {
+                              recordAudio: Bool? = nil, copied: Bool = false,
+                              extra: [String: Any] = [:]) {
         guard let token = sessionTokens[id] else { return }
         var info: [String: Any] = ["token": token, "kind": kind,
                                    "success": success, "message": message]
+        info.merge(extra) { _, new in new }
         if let recordTo { info["recordTo"] = recordTo }
         if let recordAudio { info["recordAudio"] = recordAudio }
         if copied { info["copied"] = true }
@@ -446,6 +455,7 @@ final class MirrorStore: ObservableObject {
                 guard let self, self.recordingProcesses[id] === finished else { return }
                 self.recordingProcesses.removeValue(forKey: id)
                 self.recordingKinds.removeValue(forKey: id)
+                PhoneQuiet.end(serial: session.endpoint)
                 let requested = self.recordingStops.remove(id) != nil
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 let success = requested && finished.terminationStatus == 0 && size > 0
@@ -481,6 +491,7 @@ final class MirrorStore: ObservableObject {
         }
         do {
             try recorder.run()
+            PhoneQuiet.begin(serial: session.endpoint)
             recordingProcesses[id] = recorder
             recordingKinds[id] = kind
             sessions[id] = MirrorSession(endpoint: session.endpoint,
@@ -542,6 +553,10 @@ final class MirrorStore: ObservableObject {
     }
 
     func unregisterAppWindow(key: String) {
+        // A window closed while recording gives the phone its notifications back.
+        if appRecordings[key] != nil, let endpoint = sessions[key]?.endpoint {
+            PhoneQuiet.end(serial: endpoint)
+        }
         processes.removeValue(forKey: key)
         sessionTokens.removeValue(forKey: key)
         sessionDevices.removeValue(forKey: key)
@@ -573,6 +588,7 @@ final class MirrorStore: ObservableObject {
         if let recording = appRecordings[id] {
             guard recording.kind == kind else { return }
             appRecordings.removeValue(forKey: id)
+            if let endpoint = sessions[id]?.endpoint { PhoneQuiet.end(serial: endpoint) }
             if let current = sessions[id] {
                 sessions[id] = MirrorSession(endpoint: current.endpoint, transport: current.transport,
                                              recording: false, ready: current.ready)
@@ -606,6 +622,7 @@ final class MirrorStore: ObservableObject {
         let source = isGIF ? FileManager.default.temporaryDirectory
             .appendingPathComponent("lanadb-gif-\(UUID().uuidString).mp4") : destination
         appRecordings[id] = AppRecording(kind: kind, destination: destination, source: source)
+        if let endpoint = sessions[id]?.endpoint { PhoneQuiet.begin(serial: endpoint) }
         if let current = sessions[id] {
             sessions[id] = MirrorSession(endpoint: current.endpoint, transport: current.transport,
                                          recording: true, ready: current.ready)
@@ -623,6 +640,7 @@ final class MirrorStore: ObservableObject {
             return
         }
         errors[id] = nil
+        CaptureHistory.shared.add(destination)
         let reveal = revealAutomatically
         let copied = copyAutomatically && Self.copyToClipboard(destination)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -787,6 +805,11 @@ final class MirrorStore: ObservableObject {
         // Letters travel as text too, so a host input method (Pinyin...) never
         // leaks raw keys; the title bar build pastes non-ASCII text.
         arguments.append("--prefer-text")
+        // The phone stays lit while mirrored (its own timeout comes back after).
+        if PhoneSettings.stayAwake { arguments.append("--screen-off-timeout=1800") }
+        if PhoneSettings.lockOnClose { arguments.append("--power-off-on-close") }
+        // Where this device's window was last left.
+        arguments += WindowPlaces.arguments(device.identity)
         process.arguments = arguments
 
         var environment = ProcessInfo.processInfo.environment
@@ -798,6 +821,11 @@ final class MirrorStore: ObservableObject {
         environment["LANADB_RECORDING"] = "0"
         environment["LANADB_AUDIO_ENABLED"] = options.audio ? "1" : "0"
         environment["LANADB_ARROW_SWIPE"] = Self.arrowSwipe ? "1" : "0"
+        // The first mirror after installing points at the ⌘/ shortcut sheet.
+        if !UserDefaults.standard.bool(forKey: "tips.shortcutSheet") {
+            UserDefaults.standard.set(true, forKey: "tips.shortcutSheet")
+            environment["LANADB_SHORTCUT_TIP"] = "1"
+        }
         environment["LANADB_GAMUT"] = "srgb"
         environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
         environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
@@ -969,6 +997,35 @@ final class MirrorStore: ObservableObject {
     /// sound goes back to the phone's speaker instead of the mirror.
     func mainMirrorCapturesAudio(for device: ADBDevice) -> Bool {
         processes[device.identity] != nil && sessionOptions[device.identity]?.audio == true
+    }
+
+    /// Puts every mirror window (Android, single-app and iPhone) side by
+    /// side on the screen in front: equal columns, each window keeping its
+    /// own proportions, top-aligned.
+    func arrangeAllWindows() {
+        let android = processes.keys.filter { sessions[$0]?.ready == true }
+            .map { ($0, appWindowTitles[$0] ?? sessionDevices[$0]?.title ?? $0) }
+        let apple = IOSMirrorStore.shared.openWindowTitles
+        let all = (android.map { ("android", $0.0, $0.1) } + apple.map { ("ios", $0.0, $0.1) })
+            .sorted { $0.2.localizedStandardCompare($1.2) == .orderedAscending }
+        guard !all.isEmpty, let screen = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else { return }
+        let margin: CGFloat = 16
+        let width = (screen.width - margin * CGFloat(all.count + 1)) / CGFloat(all.count)
+        for (index, item) in all.enumerated() {
+            let rect = NSRect(x: screen.minX + margin + CGFloat(index) * (width + margin),
+                              y: screen.minY + margin, width: width, height: screen.height - margin * 2)
+            if item.0 == "ios" {
+                IOSMirrorStore.shared.arrange(id: item.1, in: rect)
+            } else {
+                notifyMirror(id: item.1, kind: "arrange", success: true, message: "", extra: [
+                    "x": "\(Int(rect.minX))", "y": "\(Int(rect.minY))",
+                    "w": "\(Int(rect.width))", "h": "\(Int(rect.height))"])
+            }
+        }
+    }
+
+    var windowCount: Int {
+        processes.keys.filter { sessions[$0]?.ready == true }.count + IOSMirrorStore.shared.openWindowTitles.count
     }
 
     /// A mirror, single-app window or recording is running, or a capture is

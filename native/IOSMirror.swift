@@ -103,6 +103,15 @@ final class IOSMirrorStore: ObservableObject {
     /// A window is open, starting, or still saving its recording.
     var hasActiveWork: Bool { !windows.isEmpty || !starting.isEmpty || savingCount > 0 }
 
+    /// Open windows (device ID, title), for arranging them side by side.
+    var openWindowTitles: [(String, String)] {
+        windows.filter { open.contains($0.key) }.map { ($0.key, $0.value.device.title) }
+    }
+
+    func arrange(id: String, in rect: NSRect) {
+        windows[id]?.fit(in: rect)
+    }
+
     func stopAll() {
         windows.values.forEach { $0.close() }
     }
@@ -283,6 +292,23 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
             session.commitConfiguration()
             if !session.isRunning { session.startRunning() }
         }
+    }
+
+    /// Fills the given screen area as far as the picture's proportions allow,
+    /// top-aligned and centred (for arranging windows side by side).
+    func fit(in rect: NSRect) {
+        guard let window, let content = window.contentView, content.frame.height > 0 else { return }
+        let chrome = window.frame.height - content.frame.height
+        let ratio = content.frame.width / content.frame.height
+        var height = rect.height - chrome
+        var width = height * ratio
+        if width > rect.width {
+            width = rect.width
+            height = width / ratio
+        }
+        let frame = NSRect(x: (rect.midX - width / 2).rounded(), y: (rect.maxY - height - chrome).rounded(),
+                           width: width.rounded(), height: (height + chrome).rounded())
+        window.setFrame(frame, display: true, animate: true)
     }
 
     func bringForward() {
@@ -790,6 +816,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     /// Saved: the thumbnail shrinks into the corner, and the file is copied
     /// and revealed as the settings say, as in the Android window.
     private func delivered(_ url: URL) {
+        CaptureHistory.shared.add(url)
         let copy = UserDefaults.standard.object(forKey: MirrorStore.copyToClipboardKey) as? Bool ?? true
         let reveal = UserDefaults.standard.object(forKey: MirrorStore.revealInFinderKey) as? Bool ?? false
         let copied = copy && MirrorStore.copyToClipboard(url)
