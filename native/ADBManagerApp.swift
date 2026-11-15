@@ -1765,6 +1765,7 @@ struct MirrorSettingsView: View {
                         if let release = updates.available {
                             Button("下载新版本 \(release.version)") { NSWorkspace.shared.open(release.page) }
                                 .buttonStyle(.borderedProminent)
+                                .tint(Theme.accent)
                         }
                         Button(updates.checking ? "正在检查…" : "立即检查") { updates.check() }
                             .disabled(updates.checking)
@@ -1944,11 +1945,13 @@ struct MirrorSettingsView: View {
             .frame(minHeight: 380)
             .tabItem { Label("外观", systemImage: "paintbrush") }
         }
-        .tint(Theme.accent)
+        // Option values in the normal text colour, switches in the brand colour.
+        .tint(.primary)
+        .toggleStyle(AccentSwitchStyle())
         .frame(width: 540)
         // Frosted glass behind every page; the forms drop their opaque fill.
         .scrollContentBackground(.hidden)
-        .background(GlassBackground(material: .sidebar).ignoresSafeArea())
+        .glassWindow()
     }
 }
 

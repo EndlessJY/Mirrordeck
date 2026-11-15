@@ -225,9 +225,28 @@ struct GlassBackground: NSViewRepresentable {
 }
 
 extension View {
-    /// A sheet or panel on frosted glass instead of the opaque window colour.
-    func glassPanel(_ material: NSVisualEffectView.Material = .popover) -> some View {
-        background(GlassBackground(material: material).ignoresSafeArea())
-            .presentationBackground(.clear)
+    /// A sheet on light, see-through frosted glass (the iOS look) instead of
+    /// the opaque window colour.
+    func glassPanel() -> some View {
+        presentationBackground(.ultraThinMaterial)
+    }
+
+    /// The whole window on that glass: macOS 15 and later draw it as the
+    /// window's own background; macOS 14 falls back to a frosted view.
+    @ViewBuilder
+    func glassWindow() -> some View {
+        if #available(macOS 15.0, *) {
+            containerBackground(.ultraThinMaterial, for: .window)
+        } else {
+            background(GlassBackground(material: .popover).ignoresSafeArea())
+        }
+    }
+}
+
+/// Switches in the brand colour while everything else in the view keeps the
+/// normal text colour (a view-wide tint also colours picker values).
+struct AccentSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Toggle(configuration).toggleStyle(.switch).tint(Theme.accent)
     }
 }
