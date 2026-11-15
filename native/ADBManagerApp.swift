@@ -1104,12 +1104,11 @@ struct DeviceDetail: View {
             Button("恢复窗口默认位置") { WindowPlaces.forget(device.identity) }
                 .disabled(!WindowPlaces.has(device.identity))
         } label: {
-            Image(systemName: "ellipsis.circle")
+            Label("投屏选项", systemImage: "slider.horizontal.3")
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .menuStyle(.button)
         .fixedSize()
-        .help("这台设备的投屏选项：清晰度、帧率、声音、自动投屏")
+        .help("这台设备单独的清晰度、帧率、声音，以及连接后自动投屏")
     }
 
     private enum MirrorState: Equatable { case idle, starting, live }
@@ -1174,31 +1173,30 @@ struct DeviceDetail: View {
 
     // MARK: Header
 
+    /// Who the device is on top; one row of actions under it, main action
+    /// first: 投屏 · 应用 · 日志 · 投屏选项. Same height, left-aligned, so
+    /// nothing is squeezed and the order reads as importance.
     @ViewBuilder
     private var header: some View {
         if theme.isAppleNative {
-            HStack(alignment: .center, spacing: 16) {
-                DeviceHeroIllustration(device: device)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(device.title)
-                        .font(.title2.weight(.semibold))
-                        .lineLimit(1)
-                        .textSelection(.enabled)
-                    Text(nativeSubtitle)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    chips
-                        .padding(.top, 2)
-                    // Secondary tools under the name: the right side keeps
-                    // only the main action, so nothing gets squeezed.
-                    tools
-                        .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 16) {
+                    DeviceHeroIllustration(device: device)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(device.title)
+                            .font(.title2.weight(.semibold))
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                        Text(nativeSubtitle)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        chips
+                            .padding(.top, 2)
+                    }
+                    Spacer(minLength: 0)
                 }
-                .layoutPriority(1)
-                Spacer(minLength: 12)
-                mirrorControl
-                deviceOptionsMenu
+                actionBar
             }
             .padding(18)
             .background(
@@ -1211,23 +1209,31 @@ struct DeviceDetail: View {
             )
             .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
         } else {
-            HStack(alignment: .center, spacing: 16) {
-                IconTile(symbol: device.symbol, size: 64, style: .gradient)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(device.title)
-                        .font(.title2.weight(.semibold))
-                        .lineLimit(1)
-                        .textSelection(.enabled)
-                    chips
-                    tools
-                        .padding(.top, 4)
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .center, spacing: 16) {
+                    IconTile(symbol: device.symbol, size: 64, style: .gradient)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(device.title)
+                            .font(.title2.weight(.semibold))
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                        chips
+                    }
+                    Spacer(minLength: 0)
                 }
-                .layoutPriority(1)
-                Spacer(minLength: 12)
-                mirrorControl
-                deviceOptionsMenu
+                actionBar
             }
         }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 8) {
+            mirrorControl
+            tools
+            deviceOptionsMenu
+            Spacer(minLength: 0)
+        }
+        .controlSize(.large)
     }
 
     /// Secondary tools beside the main mirror action.
@@ -1250,7 +1256,6 @@ struct DeviceDetail: View {
             }
             .help("查看这台设备的实时日志")
         }
-        .controlSize(.regular)
         .fixedSize()
         .disabled(!device.connected)
     }
