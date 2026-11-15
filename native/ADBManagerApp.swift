@@ -1082,9 +1082,6 @@ struct DeviceDetail: View {
     @ObservedObject private var prefs = DevicePrefsStore.shared
     /// Two columns of cards fit (each needs about 270 points).
     @State private var wideLayout = true
-    /// The page's width once it stopped changing (see the ScrollView body).
-    @State private var contentWidth: CGFloat?
-    @State private var widthSettle: DispatchWorkItem?
 
     /// This device's own mirror settings, next to the mirror button.
     private var deviceOptionsMenu: some View {
@@ -1175,34 +1172,18 @@ struct DeviceDetail: View {
                 }
                 infoSection
             }
-            // A settled width, not the live one: while the sidebar slides the
-            // page keeps its layout and only moves; it is laid out again once,
-            // when the width has stopped changing.
-            .frame(width: contentWidth.map { min(780, max(320, $0)) }, alignment: .leading)
-            .frame(maxWidth: contentWidth == nil ? 780 : nil, alignment: .leading)
+            .frame(maxWidth: 780, alignment: .leading)
+            // One or two columns from the live width; switched at once (no
+            // cross-fade between the two layouts while the sidebar slides).
+            .onGeometryChange(for: Bool.self) { $0.size.width >= 560 } action: { wide in
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) { wideLayout = wide }
+            }
             .padding(Theme.pagePadding)
-            // minWidth 0: the settled width must not become the page's minimum,
-            // or the split view folds the sidebar away to make room for it.
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
-            .clipped()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .animation(Theme.quick, value: mirrorState)
             .animation(Theme.quick, value: theme.style)
-        }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width - Theme.pagePadding * 2 } action: { width in
-            widthSettle?.cancel()
-            guard contentWidth != nil else {
-                contentWidth = width
-                wideLayout = width >= 560
-                return
-            }
-            let work = DispatchWorkItem {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    contentWidth = width
-                    wideLayout = min(780, width) >= 560
-                }
-            }
-            widthSettle = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
         .sheet(isPresented: $pickingApp) {
             AppPickerView(device: device, options: mirrorOptions)
@@ -1676,7 +1657,10 @@ struct InfoRow: View {
     @State private var resetTask: DispatchWorkItem?
 
     var body: some View {
-        Button(action: copy) {
+        // A plain row, not a Button with a tooltip: forty of those made every
+        // frame of the sidebar animation re-lay out their hover and tooltip
+        // machinery (measured: ~48 ms a frame, now ~26 ms).
+        Group {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(item.label).foregroundStyle(.secondary).fixedSize()
                 Spacer(minLength: 8)
@@ -1709,7 +1693,10 @@ struct InfoRow: View {
                     .padding(.horizontal, 4)
             )
         }
-        .buttonStyle(.plain)
+        .onTapGesture(perform: copy)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(named: "拷贝") { copy() }
         .onHover { inside in
             hovering = inside
             if !theme.isAppleNative {
@@ -1718,7 +1705,6 @@ struct InfoRow: View {
                 (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
             }
         }
-        .help(item.value.contains("\n") ? "点按复制" : "\(item.value)\n点按复制")
         .animation(Theme.quick, value: copied)
         .animation(.easeOut(duration: 0.12), value: hovering)
     }
