@@ -1719,6 +1719,7 @@ struct MirrorSettingsView: View {
     @AppStorage(PhoneSettings.quietRecordingKey) private var quietRecording = true
     @AppStorage(MenuBarSettings.showKey) private var showMenuBar = true
     @AppStorage(UpdateChecker.autoKey) private var autoUpdateCheck = true
+    @ObservedObject private var layout = SettingsWindow.layout
     @ObservedObject private var updates = UpdateChecker.shared
 
     private var saveURL: URL { DeviceActions.saveDirectoryURL(saveDirectory) }
@@ -1778,7 +1779,7 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 400)
+            .frame(height: layout.pageHeight(400))
             .tabItem { Label("通用", systemImage: "gearshape") }
 
             // How every mirror looks and sounds, and what it does to the phone.
@@ -1841,7 +1842,7 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 452)
+            .frame(height: layout.pageHeight(452))
             .tabItem { Label("投屏", systemImage: "display") }
 
             // Screenshots, recordings and animations: where they go, how they are made.
@@ -1906,7 +1907,7 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 560)
+            .frame(height: layout.pageHeight(560))
             .tabItem { Label("录制", systemImage: "record.circle") }
 
             Form {
@@ -1942,13 +1943,13 @@ struct MirrorSettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 380)
+            .frame(height: layout.pageHeight(380))
             .tabItem { Label("外观", systemImage: "paintbrush") }
         }
         // Option values in the normal text colour, switches in the brand colour.
         .tint(.primary)
         .toggleStyle(AccentSwitchStyle())
-        .frame(width: 540)
+        .frame(width: layout.width)
         // Frosted glass behind every page; the forms drop their opaque fill.
         .scrollContentBackground(.hidden)
         .glassWindow()
@@ -2390,6 +2391,11 @@ struct ContentView: View {
                     .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
                         CaptureHistoryView()
                     }
+                }
+                // Each button its own round glass button, as on the sidebar
+                // side, instead of macOS 26 merging the two into one capsule.
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button { SettingsWindow.show(openSettings) } label: {

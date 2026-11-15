@@ -191,18 +191,58 @@ final class MenuBarSettings: ObservableObject {
 }
 
 /// One settings window: clicking “设置” again brings the open one forward
-/// instead of opening another.
+/// instead of opening another. Each time it opens it is fitted to the main
+/// window — never wider or taller — and placed over it; pages that do not
+/// fit scroll.
 enum SettingsWindow {
+    final class Layout: ObservableObject {
+        @Published var width: CGFloat = 540
+        /// Room for a page under the title and the tab icons.
+        @Published var maxPageHeight: CGFloat = 560
+
+        func pageHeight(_ natural: CGFloat) -> CGFloat { max(260, min(natural, maxPageHeight)) }
+    }
+
+    static let layout = Layout()
+    /// Title bar and the row of tab icons above a page.
+    private static let chrome: CGFloat = 110
+
     static func show(_ open: OpenSettingsAction) {
+        let main = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true && $0.isVisible }
+        let bounds = main?.frame ?? (NSScreen.main?.visibleFrame.insetBy(dx: 80, dy: 60) ?? .zero)
+        layout.width = min(540, max(420, bounds.width - 40))
+        layout.maxPageHeight = max(260, bounds.height - chrome - 24)
+
         NSApp.activate()
         let existing = NSApp.windows.first { window in
             window.isVisible && (window.identifier?.rawValue.localizedCaseInsensitiveContains("settings") == true)
         }
         if let existing {
             existing.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async { place(existing, over: bounds) }
         } else {
             open()
+            // The window exists once SwiftUI has laid it out.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                if let window = NSApp.windows.first(where: {
+                    $0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") == true
+                }) {
+                    place(window, over: bounds)
+                }
+            }
         }
+    }
+
+    /// Centred horizontally over the main window, just below its top.
+    private static func place(_ window: NSWindow, over bounds: NSRect) {
+        guard bounds.width > 0 else { return }
+        let size = window.frame.size
+        var origin = NSPoint(x: bounds.midX - size.width / 2, y: bounds.maxY - size.height - 12)
+        if let screen = (window.screen ?? NSScreen.main)?.visibleFrame {
+            origin.x = min(max(origin.x, screen.minX), screen.maxX - size.width)
+            origin.y = min(max(origin.y, screen.minY), screen.maxY - size.height)
+        }
+        window.setFrameOrigin(origin)
     }
 }
 
