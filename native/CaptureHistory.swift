@@ -64,6 +64,7 @@ final class CaptureHistory: ObservableObject {
 /// double-click to open it, right-click for copy, Finder and trash.
 struct CaptureHistoryView: View {
     @ObservedObject private var history = CaptureHistory.shared
+    @Environment(\.dismiss) private var dismiss
 
     private let columns = [GridItem(.adaptive(minimum: 104, maximum: 132), spacing: 10)]
 
@@ -79,6 +80,8 @@ struct CaptureHistoryView: View {
                     Label("打开文件夹", systemImage: "folder")
                 }
                 .buttonStyle(.borderless)
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
             if history.items.isEmpty {
                 Text("截图、录屏和动图保存后会出现在这里，可以直接拖进聊天窗口。")

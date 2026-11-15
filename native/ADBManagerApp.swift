@@ -1067,6 +1067,8 @@ struct DeviceDetail: View {
     }
 
     @ObservedObject private var prefs = DevicePrefsStore.shared
+    /// Two columns of cards fit (each needs about 270 points).
+    @State private var wideLayout = true
 
     /// This device's own mirror settings, next to the mirror button.
     private var deviceOptionsMenu: some View {
@@ -1158,6 +1160,7 @@ struct DeviceDetail: View {
                 infoSection
             }
             .frame(maxWidth: 780, alignment: .leading)
+            .onGeometryChange(for: Bool.self) { $0.size.width >= 560 } action: { wideLayout = $0 }
             .padding(Theme.pagePadding)
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .animation(Theme.quick, value: mirrorState)
@@ -1339,13 +1342,14 @@ struct DeviceDetail: View {
     @ViewBuilder
     private var nativeTelemetryStrip: some View {
         if let storage = storageOverview {
-            ViewThatFits(in: .horizontal) {
+            if wideLayout {
                 HStack(alignment: .top, spacing: 16) {
                     nativeStorageCard(storage)
-                        .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     nativeConnectionsCard
-                        .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
+            } else {
                 VStack(alignment: .leading, spacing: 16) {
                     nativeStorageCard(storage)
                     nativeConnectionsCard
@@ -1592,14 +1596,19 @@ struct DeviceDetail: View {
             } else {
                 let columns = balancedColumns(sections)
                 // Two columns when the window is wide enough keep the list short.
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) {
-                        ForEach(0..<2, id: \.self) { index in
-                            infoColumn(columns[index])
-                                .frame(minWidth: 270, maxWidth: .infinity, alignment: .topLeading)
+                // Decided from the width once (not ViewThatFits, which lays out
+                // both versions on every frame of the sidebar animation).
+                Group {
+                    if wideLayout {
+                        HStack(alignment: .top, spacing: 16) {
+                            ForEach(0..<2, id: \.self) { index in
+                                infoColumn(columns[index])
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            }
                         }
+                    } else {
+                        infoColumn(sections)
                     }
-                    infoColumn(sections)
                 }
             }
         }
@@ -1753,9 +1762,6 @@ struct MirrorSettingsView: View {
                         .help("定时更新时也探测本网段各地址的 ADB 端口，用于找到只开了 adb tcpip、既没有广播也没连接过的设备。企业内网建议保持关闭")
                 } header: {
                     Text("发现设备")
-                } footer: {
-                    Text("关闭时只联系 USB、无线调试广播、连接过的地址和本机模拟器，不扫描整个网段。")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section {
                     LabeledContent("当前版本", value: UpdateChecker.isLocalBuild ?
@@ -1836,9 +1842,6 @@ struct MirrorSettingsView: View {
                         .help("关闭投屏窗口时让手机熄屏锁定")
                 } header: {
                     Text("手机")
-                } footer: {
-                    Text("某台设备想用不同的清晰度、帧率或声音，可在设备页投屏按钮旁的“⋯”中单独设置。")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
@@ -1927,10 +1930,6 @@ struct MirrorSettingsView: View {
                     .padding(.vertical, 4)
                 } header: {
                     Text("界面主题")
-                } footer: {
-                    Text("切换后将实时热更新主窗口、应用面板、日志窗口与已打开的投屏窗口配色，无需重启应用。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 Section("深浅外观") {
@@ -2315,6 +2314,17 @@ struct ContentView: View {
                 .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
                 .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
             }
+            // The app's name in the title bar row of the sidebar, right after the
+            // window buttons (plain text, not a toolbar button).
+            .overlay(alignment: .topLeading) {
+                Text("幕台")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 84)
+                    .padding(.top, 12)
+                    .ignoresSafeArea(edges: .top)
+                    .allowsHitTesting(false)
+            }
             // Connection status at the foot of the device list; refresh next to
             // the sidebar button, where the list it refreshes is.
             .safeAreaInset(edge: .bottom) {
@@ -2323,6 +2333,8 @@ struct ContentView: View {
                 }
             }
             .toolbar {
+                // Only with the sidebar open: it refreshes the list shown there.
+                if columns != .detailOnly {
                 ToolbarItem {
                     Button {
                         store.scanNetwork()
@@ -2335,6 +2347,7 @@ struct ContentView: View {
                     }
                     .disabled(store.scanningNetwork)
                     .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
+                }
                 }
             }
             .navigationSplitViewColumnWidth(min: 240, ideal: 270)
@@ -2383,14 +2396,16 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.18), value: store.selectedID)
             .navigationTitle("幕台")
             .toolbar {
+                // Without a centred title the buttons would sit on the left.
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.flexible, placement: .primaryAction)
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { showingHistory.toggle() } label: {
                         Label("最近捕获", systemImage: "photo.stack")
                     }
                     .help("最近的截图、录屏和动图，可直接拖进聊天窗口")
-                    .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
-                        CaptureHistoryView()
-                    }
+
                 }
                 // Each button its own round glass button, as on the sidebar
                 // side, instead of macOS 26 merging the two into one capsule.
@@ -2413,6 +2428,10 @@ struct ContentView: View {
         .onChange(of: store.report != nil) { _, ready in
             guard ready, columns == .detailOnly else { return }
             withAnimation(.spring(duration: 0.45, bounce: 0.12)) { columns = .all }
+        }
+        // Inside the main window, on the same glass as the other panels.
+        .sheet(isPresented: $showingHistory) {
+            CaptureHistoryView().glassPanel()
         }
         .sheet(item: $activeSheet) { request in
             ActionSheetView(mode: request.mode, suggestedEndpoint: request.endpoint)
@@ -2485,6 +2504,8 @@ struct LANADBManagerApp: App {
             ContentView()
         }
         .windowStyle(.titleBar)
+        // A low title bar with small buttons; the name sits in the sidebar.
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .windowArrangement) {
