@@ -10,6 +10,7 @@ void sc_audio_player_set_muted(bool muted);
 bool sc_lanadb_set_display_power(bool on);
 bool sc_lanadb_press_key(int keycode);
 bool sc_lanadb_tap_center(void);
+bool sc_lanadb_content_size(int *width, int *height);
 // LANADB: on-demand recording of single-app windows.
 bool lanadb_record_start(const char *filename, int format, bool audio);
 bool lanadb_record_stop(void);
@@ -201,6 +202,22 @@ enum {
     self.layer.shadowRadius = 10;
     self.layer.shadowOffset = CGSizeMake(0, -3);
     return self;
+}
+@end
+
+// LANADB: the device picture's area, for screenshot tools that pick regions
+// from the accessibility tree (WeChat, Snipaste...): without it they only
+// find the whole window. Invisible, and mouse clicks pass through to the mirror.
+@interface LANADBPictureView : NSView
+@end
+@implementation LANADBPictureView
+- (NSView *)hitTest:(NSPoint)point { (void) point; return nil; }
+- (BOOL)isAccessibilityElement { return YES; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityImageRole; }
+- (NSString *)accessibilityLabel { return @"设备画面"; }
+- (id)accessibilityHitTest:(NSPoint)point {
+    NSRect onScreen = [self.window convertRectToScreen:[self convertRect:self.bounds toView:nil]];
+    return NSPointInRect(point, onScreen) ? self : nil;
 }
 @end
 
@@ -427,6 +444,7 @@ enum {
 @property(nonatomic) BOOL appAtRoot;
 @property(nonatomic, strong) NSTimer *placeTimer;
 @property(nonatomic, strong) NSView *helpView;
+@property(nonatomic, strong) LANADBPictureView *pictureView;
 @property(nonatomic, strong) NSDate *rootBackAt;
 @property(nonatomic, strong) LANADBLaunchView *launchView;
 @property(nonatomic, strong) NSTimer *launchTimer;
@@ -1120,7 +1138,58 @@ enum {
     (void) notification;
     [self updateLayout];
     [self layoutHelp];
+    [self layoutPicture];
     [self schedulePlaceReport];
+}
+
+// LANADB: the window follows the picture's proportions — after a size set by
+// the app (restored place, side-by-side) or a rotation, and while resizing —
+// so there are no black bars. The top-left corner stays where it is.
+- (void)fitToPicture:(BOOL)resizeWindow {
+    NSWindow *window = self.targetWindow;
+    NSView *content = window.contentView;
+    int width = 0, height = 0;
+    if (!window || !content || !sc_lanadb_content_size(&width, &height)) { return; }
+    window.contentAspectRatio = NSMakeSize(width, height);
+    if (resizeWindow && !(window.styleMask & NSWindowStyleMaskFullScreen) && !window.isZoomed) {
+        CGFloat ratio = (CGFloat) width / height;
+        NSRect frame = window.frame;
+        CGFloat chrome = NSHeight(frame) - NSHeight(content.frame);
+        CGFloat pictureWidth = NSWidth(content.frame);
+        CGFloat pictureHeight = round(pictureWidth / ratio);
+        NSRect visible = (window.screen ?: NSScreen.mainScreen).visibleFrame;
+        if (pictureHeight + chrome > NSHeight(visible)) {
+            pictureHeight = NSHeight(visible) - chrome;
+            pictureWidth = round(pictureHeight * ratio);
+        }
+        NSRect fitted = NSMakeRect(NSMinX(frame), NSMaxY(frame) - pictureHeight - chrome,
+                                   MAX(pictureWidth, window.minSize.width), pictureHeight + chrome);
+        if (fabs(NSHeight(fitted) - NSHeight(frame)) >= 1 || fabs(NSWidth(fitted) - NSWidth(frame)) >= 1) {
+            [window setFrame:fitted display:YES];
+        }
+    }
+    [self layoutPicture];
+}
+
+- (void)layoutPicture {
+    NSView *content = self.targetWindow.contentView;
+    int width = 0, height = 0;
+    if (!content || !sc_lanadb_content_size(&width, &height)) { return; }
+    if (!self.pictureView) {
+        self.pictureView = [[LANADBPictureView alloc] initWithFrame:NSZeroRect];
+        [content addSubview:self.pictureView positioned:NSWindowBelow relativeTo:nil];
+    }
+    NSRect bounds = content.bounds;
+    CGFloat ratio = (CGFloat) width / height;
+    NSRect picture = bounds;
+    if (NSWidth(bounds) / NSHeight(bounds) > ratio) {
+        picture.size.width = NSHeight(bounds) * ratio;
+        picture.origin.x = NSMidX(bounds) - NSWidth(picture) / 2;
+    } else {
+        picture.size.height = NSWidth(bounds) / ratio;
+        picture.origin.y = NSMidY(bounds) - NSHeight(picture) / 2;
+    }
+    self.pictureView.frame = NSIntegralRect(picture);
 }
 
 - (void)windowDidMove:(NSNotification *)notification {
@@ -1166,7 +1235,9 @@ enum {
     if (!window || !content || content.frame.size.height <= 0) { return; }
     if (window.styleMask & NSWindowStyleMaskFullScreen) { return; }
     CGFloat chrome = window.frame.size.height - content.frame.size.height;
-    CGFloat ratio = content.frame.size.width / content.frame.size.height;
+    int pictureWidth = 0, pictureHeight = 0;
+    CGFloat ratio = sc_lanadb_content_size(&pictureWidth, &pictureHeight) ?
+        (CGFloat) pictureWidth / pictureHeight : content.frame.size.width / content.frame.size.height;
     CGFloat height = rect.size.height - chrome;
     CGFloat width = height * ratio;
     if (width > rect.size.width) {
@@ -1755,6 +1826,18 @@ lanadb_apply_gamut(NSWindow *window) {
 // LANADB: the window's title bar, for notices from C code (dropped files).
 static __weak LANADBTitlebarController *lanadb_active_titlebar;
 
+// LANADB: the picture got its first size, or turned (rotation).
+void
+sc_lanadb_content_size_changed(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // After scrcpy's own resize for the new size has gone through.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [lanadb_active_titlebar fitToPicture:YES];
+        });
+    });
+}
+
 // LANADB: a file dropped on the window — phase 0 when it starts, 1 when done.
 void
 sc_lanadb_file_event(int phase, bool apk, const char *file, bool ok) {
@@ -1813,6 +1896,7 @@ sc_macos_titlebar_install(SDL_Window *window) {
         [nativeWindow makeKeyAndOrderFront:nil];
         [controller postAction:@"ready"];
         lanadb_apply_gamut(nativeWindow);
+        [controller fitToPicture:YES];
         // The first mirrors after installing point at the shortcut sheet once.
         const char *tip = getenv("LANADB_SHORTCUT_TIP");
         if (tip && !strcmp(tip, "1")) {

@@ -27,11 +27,9 @@ final class MirrorStore: ObservableObject {
     static let shared = MirrorStore()
     static let revealInFinderKey = "capture.revealInFinder"
     static let copyToClipboardKey = "capture.copyToClipboard"
-    /// ↑ / ↓ swipe the screen in mirror windows (on by default).
-    static let arrowSwipeKey = "mirror.arrowSwipe"
-    static var arrowSwipe: Bool {
-        UserDefaults.standard.object(forKey: arrowSwipeKey) as? Bool ?? true
-    }
+    /// ↑ / ↓ swipe the screen and Space pauses in mirror windows: always on
+    /// (no setting; Space still types while the phone's keyboard is up).
+    static let arrowSwipe = true
     private var copyAutomatically: Bool {
         UserDefaults.standard.object(forKey: Self.copyToClipboardKey) as? Bool ?? true
     }
@@ -274,6 +272,7 @@ final class MirrorStore: ObservableObject {
                 WindowPlaces.save(id, x: x, y: y, width: width, height: height)
             }
         case "ready":
+            stallRetried.remove(id)
             if var current = sessions[id] {
                 current.ready = true
                 sessions[id] = current
@@ -872,6 +871,7 @@ final class MirrorStore: ObservableObject {
             if options.videoCodec == "h265" {
                 watchForEncoderFailure(id: id, device: device, process: process, log: logURL)
             }
+            watchForStall(id: id, process: process, log: logURL)
         } catch {
             logHandle.closeFile()
             try? FileManager.default.removeItem(at: logURL)
@@ -898,6 +898,11 @@ final class MirrorStore: ObservableObject {
         if h264Relaunches.remove(id) != nil {
             var options = options
             options.videoCodec = "h264"
+            launch(device: device, transport: transport, fallback: fallback, options: options)
+            return
+        }
+        if stallRelaunches.remove(id) != nil {
+            // The window never came up: once more, as "cancel and retry" would.
             launch(device: device, transport: transport, fallback: fallback, options: options)
             return
         }
@@ -948,6 +953,36 @@ final class MirrorStore: ObservableObject {
         startupTokens.removeValue(forKey: id)
     }
 
+    /// Mirrors that hung before their window came up, restarted once.
+    private var stallRelaunches = Set<String>()
+    private var stallRetried = Set<String>()
+
+    /// A mirror whose window has not come up after 15 s is stuck (a stalled
+    /// connection, no first frame): it is restarted once by itself; a second
+    /// time it stops with the reason, instead of showing "正在启动投屏…" forever.
+    private func watchForStall(id: String, process: Process, log: URL) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard let self, self.processes[id] === process, process.isRunning,
+                  self.sessions[id]?.ready != true else {
+                self?.stallRetried.remove(id)
+                return
+            }
+            if self.stallRetried.insert(id).inserted {
+                NSLog("幕台：投屏 15 秒未出现窗口，自动重试")
+                self.stallRelaunches.insert(id)
+            } else {
+                self.stallRetried.remove(id)
+                self.expectedStops.insert(id)
+                let output = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+                let reason = output.split(separator: "\n").map(String.init)
+                    .filter { $0.contains("ERROR") || $0.contains("WARN") }
+                    .suffix(2).joined(separator: " ")
+                self.errors[id] = "投屏启动超时，请检查设备连接后重试。" + (reason.isEmpty ? "" : "（\(reason)）")
+            }
+            process.terminate()
+        }
+    }
+
     /// When the device cannot encode H.265 the mirror keeps running without a
     /// picture, so its first seconds of output are checked for the encoder
     /// error; the mirror is then restarted with H.264.
@@ -970,6 +1005,8 @@ final class MirrorStore: ObservableObject {
     func stop(deviceID: String) {
         startupTokens.removeValue(forKey: deviceID)
         starting.remove(deviceID)
+        stallRetried.remove(deviceID)
+        stallRelaunches.remove(deviceID)
         recordingPreparing.remove(deviceID)
         if let recorder = recordingProcesses[deviceID] {
             recordingStops.insert(deviceID)

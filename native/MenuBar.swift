@@ -49,10 +49,7 @@ struct MenuBarContent: View {
             Divider()
         }
         Button("打开幕台") { showMainWindow() }
-        Button("设置…") {
-            NSApp.activate()
-            openSettings()
-        }
+        Button("设置…") { SettingsWindow.show(openSettings) }
         Divider()
         Button("退出幕台") { NSApp.terminate(nil) }
     }
@@ -189,6 +186,22 @@ final class MenuBarSettings: ObservableObject {
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.shown != Self.show else { return }
             self.shown = Self.show
+        }
+    }
+}
+
+/// One settings window: clicking “设置” again brings the open one forward
+/// instead of opening another.
+enum SettingsWindow {
+    static func show(_ open: OpenSettingsAction) {
+        NSApp.activate()
+        let existing = NSApp.windows.first { window in
+            window.isVisible && (window.identifier?.rawValue.localizedCaseInsensitiveContains("settings") == true)
+        }
+        if let existing {
+            existing.makeKeyAndOrderFront(nil)
+        } else {
+            open()
         }
     }
 }

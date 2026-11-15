@@ -1190,9 +1190,13 @@ struct DeviceDetail: View {
                         .lineLimit(1)
                     chips
                         .padding(.top, 2)
+                    // Secondary tools under the name: the right side keeps
+                    // only the main action, so nothing gets squeezed.
+                    tools
+                        .padding(.top, 6)
                 }
+                .layoutPriority(1)
                 Spacer(minLength: 12)
-                tools
                 mirrorControl
                 deviceOptionsMenu
             }
@@ -1215,9 +1219,11 @@ struct DeviceDetail: View {
                         .lineLimit(1)
                         .textSelection(.enabled)
                     chips
+                    tools
+                        .padding(.top, 4)
                 }
+                .layoutPriority(1)
                 Spacer(minLength: 12)
-                tools
                 mirrorControl
                 deviceOptionsMenu
             }
@@ -1244,7 +1250,8 @@ struct DeviceDetail: View {
             }
             .help("查看这台设备的实时日志")
         }
-        .controlSize(.large)
+        .controlSize(.regular)
+        .fixedSize()
         .disabled(!device.connected)
     }
 
@@ -1261,6 +1268,8 @@ struct DeviceDetail: View {
                      tint: info.value("状态", for: device.id) == "正在充电" ? Theme.online : nil)
             }
         }
+        // Chips keep their full text; never squeezed into "天…".
+        .fixedSize()
     }
 
     private func batterySymbol(_ level: String) -> String {
@@ -1282,6 +1291,7 @@ struct DeviceDetail: View {
             HStack(spacing: 10) {
                 ProgressView().controlSize(.small)
                 Text("正在启动投屏…").font(.callout).foregroundStyle(.secondary)
+                    .fixedSize()
                 Button("取消") { stopMirror() }
                     .controlSize(.large)
             }
@@ -1702,7 +1712,6 @@ struct MirrorSettingsView: View {
     @AppStorage(RecordingSettings.gifQualityKey) private var gifQuality = "standard"
     @AppStorage(RecordingSettings.animatedFormatKey) private var animatedFormat = "webp"
     @AppStorage(DeviceStore.subnetScanKey) private var subnetScan = false
-    @AppStorage(MirrorStore.arrowSwipeKey) private var arrowSwipe = true
     @AppStorage(PhoneSettings.stayAwakeKey) private var stayAwake = true
     @AppStorage(PhoneSettings.lockOnCloseKey) private var lockOnClose = false
     @AppStorage(PhoneSettings.quietRecordingKey) private var quietRecording = true
@@ -1728,8 +1737,50 @@ struct MirrorSettingsView: View {
 
     var body: some View {
         TabView {
+            // App-wide: menu bar, finding devices, updates.
             Form {
-                Section("视频") {
+                Section {
+                    Toggle("在菜单栏显示幕台", isOn: $showMenuBar)
+                        .help("从菜单栏直接投屏、截图、打开日志；关闭主窗口后幕台仍在菜单栏运行")
+                } header: {
+                    Text("菜单栏")
+                }
+                Section {
+                    Toggle("定时刷新设备", isOn: $subnetScan)
+                        .help("定时更新时也探测本网段各地址的 ADB 端口，用于找到只开了 adb tcpip、既没有广播也没连接过的设备。企业内网建议保持关闭")
+                } header: {
+                    Text("发现设备")
+                } footer: {
+                    Text("关闭时只联系 USB、无线调试广播、连接过的地址和本机模拟器，不扫描整个网段。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section {
+                    LabeledContent("当前版本", value: UpdateChecker.isLocalBuild ?
+                                   "\(UpdateChecker.currentVersion)（本机构建）" : UpdateChecker.currentVersion)
+                    Toggle("自动检查更新", isOn: $autoUpdateCheck)
+                        .help("每天最多一次，读取 GitHub 上的最新版本信息；不会自动下载或安装")
+                    HStack {
+                        if let release = updates.available {
+                            Button("下载新版本 \(release.version)") { NSWorkspace.shared.open(release.page) }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        Button(updates.checking ? "正在检查…" : "立即检查") { updates.check() }
+                            .disabled(updates.checking)
+                        if let status = updates.status {
+                            Text(status).foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("更新")
+                }
+            }
+            .formStyle(.grouped)
+            .frame(minHeight: 400)
+            .tabItem { Label("通用", systemImage: "gearshape") }
+
+            // How every mirror looks and sounds, and what it does to the phone.
+            Form {
+                Section {
                     Picker("清晰度上限", selection: $maxSize) {
                         Text("1280 像素").tag(1280)
                         Text("1600 像素").tag(1600)
@@ -1760,6 +1811,8 @@ struct MirrorSettingsView: View {
                         Text("H.264（兼容性最好）").tag("h264")
                         Text("H.265（设备支持时）").tag("h265")
                     }
+                } header: {
+                    Text("画面")
                 }
                 Section {
                     Toggle("播放设备声音", isOn: $audioEnabled)
@@ -1770,13 +1823,7 @@ struct MirrorSettingsView: View {
                     }
                     .disabled(!audioEnabled)
                 } header: {
-                    Text("音频")
-                }
-                Section {
-                    Toggle("键盘刷视频（↑↓ 切换、空格暂停）", isOn: $arrowSwipe)
-                        .help("在投屏窗口按 ↑ / ↓ 上下滑动屏幕，切换上一条或下一条短视频；按空格点按屏幕中央暂停或继续（手机键盘弹出时仍输入空格）。关闭后这些按键按原样发送给设备")
-                } header: {
-                    Text("键盘")
+                    Text("声音")
                 }
                 Section {
                     Toggle("投屏时保持手机亮屏", isOn: $stayAwake)
@@ -1785,17 +1832,16 @@ struct MirrorSettingsView: View {
                         .help("关闭投屏窗口时让手机熄屏锁定")
                 } header: {
                     Text("手机")
-                }
-                Section {
-                    Toggle("定时刷新设备", isOn: $subnetScan)
-                } header: {
-                    Text("发现设备")
+                } footer: {
+                    Text("某台设备想用不同的清晰度、帧率或声音，可在设备页投屏按钮旁的“⋯”中单独设置。")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
             .frame(minHeight: 452)
             .tabItem { Label("投屏", systemImage: "display") }
 
+            // Screenshots, recordings and animations: where they go, how they are made.
             Form {
                 Section {
                     LabeledContent("保存位置") {
@@ -1808,12 +1854,12 @@ struct MirrorSettingsView: View {
                             Button("更改…", action: chooseFolder)
                         }
                     }
-                    Toggle("保存后在访达中显示", isOn: $revealInFinder)
                     Toggle("保存后复制到剪贴板", isOn: $copyToClipboard)
+                    Toggle("保存后在访达中显示", isOn: $revealInFinder)
                 } header: {
-                    Text("截图与录屏")
+                    Text("保存")
                 }
-                Section("录屏") {
+                Section {
                     Picker("画质", selection: $recordQuality) {
                         Text("高（原始分辨率 · 16 Mbps · 60 帧）").tag("high")
                         Text("标准（1920 像素 · 8 Mbps · 60 帧）").tag("standard")
@@ -1825,8 +1871,8 @@ struct MirrorSettingsView: View {
                         Text("MKV（录制意外中断时文件仍可用）").tag("mkv")
                     }
                     Toggle("录制设备声音", isOn: $recordAudio)
-                    Toggle("录制时开启手机勿扰", isOn: $quietRecording)
-                        .help("录屏和录制动图期间开启 Android 手机的勿扰模式，避免把通知录进去；录完恢复（原本已开勿扰则不变）")
+                } header: {
+                    Text("录屏")
                 }
                 Section {
                     if theme.isAppleNative {
@@ -1849,9 +1895,15 @@ struct MirrorSettingsView: View {
                 } header: {
                     Text("动图")
                 }
+                Section {
+                    Toggle("开启手机勿扰", isOn: $quietRecording)
+                        .help("录屏和录制动图期间开启 Android 手机的勿扰模式，避免把通知录进去；录完恢复（原本已开勿扰则不变）")
+                } header: {
+                    Text("录制期间")
+                }
             }
             .formStyle(.grouped)
-            .frame(minHeight: 510)
+            .frame(minHeight: 560)
             .tabItem { Label("录制", systemImage: "record.circle") }
 
             Form {
@@ -1889,35 +1941,6 @@ struct MirrorSettingsView: View {
             .formStyle(.grouped)
             .frame(minHeight: 380)
             .tabItem { Label("外观", systemImage: "paintbrush") }
-
-            Form {
-                Section {
-                    Toggle("在菜单栏显示幕台", isOn: $showMenuBar)
-                        .help("从菜单栏直接投屏、截图、打开日志；关闭主窗口后幕台仍在菜单栏运行")
-                }
-                Section {
-                    LabeledContent("当前版本", value: UpdateChecker.isLocalBuild ?
-                                   "\(UpdateChecker.currentVersion)（本机构建）" : UpdateChecker.currentVersion)
-                    Toggle("自动检查更新", isOn: $autoUpdateCheck)
-                        .help("每天最多一次，读取 GitHub 上的最新版本信息；不会自动下载或安装")
-                    HStack {
-                        if let release = updates.available {
-                            Button("下载新版本 \(release.version)") { NSWorkspace.shared.open(release.page) }
-                                .buttonStyle(.borderedProminent)
-                        }
-                        Button(updates.checking ? "正在检查…" : "立即检查") { updates.check() }
-                            .disabled(updates.checking)
-                        if let status = updates.status {
-                            Text(status).foregroundStyle(.secondary)
-                        }
-                    }
-                } header: {
-                    Text("更新")
-                }
-            }
-            .formStyle(.grouped)
-            .frame(minHeight: 300)
-            .tabItem { Label("通用", systemImage: "gearshape") }
         }
         .tint(Theme.accent)
         .frame(width: 540)
@@ -2283,6 +2306,28 @@ struct ContentView: View {
                 .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
                 .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
             }
+            // Connection status at the foot of the device list; refresh next to
+            // the sidebar button, where the list it refreshes is.
+            .safeAreaInset(edge: .bottom) {
+                if store.report != nil || store.error != nil {
+                    statusBar
+                }
+            }
+            .toolbar {
+                ToolbarItem {
+                    Button {
+                        store.scanNetwork()
+                    } label: {
+                        if store.scanningNetwork {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label("刷新设备", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(store.scanningNetwork)
+                    .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
+                }
+            }
             .navigationSplitViewColumnWidth(min: 240, ideal: 270)
         } detail: {
             ZStack {
@@ -2339,7 +2384,7 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button { openSettings() } label: {
+                    Button { SettingsWindow.show(openSettings) } label: {
                         Label("设置", systemImage: "gearshape")
                     }
                     .help("设置（⌘,）")
@@ -2347,11 +2392,6 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .showCaptureHistory)) { _ in
                 showingHistory = true
-            }
-            .safeAreaInset(edge: .bottom) {
-                if store.report != nil || store.error != nil {
-                    statusBar
-                }
             }
         }
         .tint(Theme.accent)
@@ -2380,44 +2420,39 @@ struct ContentView: View {
         return .handled
     }
 
+    /// The device list's foot: connection status, and a new version when
+    /// there is one.
     private var statusBar: some View {
-        HStack(spacing: 7) {
-            if store.scanning {
-                ProgressView().controlSize(.mini)
-            } else {
-                Image(systemName: store.error == nil ? "checkmark.circle.fill" :
-                                                       "exclamationmark.triangle.fill")
-                    .foregroundStyle(store.error == nil ? Theme.online : Theme.attention)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                if store.scanning {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: store.error == nil ? "checkmark.circle.fill" :
+                                                           "exclamationmark.triangle.fill")
+                        .foregroundStyle(store.error == nil ? Theme.online : Theme.attention)
+                }
+                Text(store.error ?? store.phase)
+                    .lineLimit(2)
+                    .contentTransition(.opacity)
+                    .help(store.error ?? store.phase)
             }
-            Text(store.error ?? store.phase)
-                .lineLimit(1)
-                .contentTransition(.opacity)
-            Spacer()
             if let release = updates.available {
                 Button {
                     NSWorkspace.shared.open(release.page)
                 } label: {
-                    Label("新版本 \(release.version)", systemImage: "arrow.down.circle.fill")
+                    Label("新版本 \(release.version) 可下载", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Theme.accent)
                 .help("打开 GitHub 下载新版本")
             }
-            Button {
-                store.scanNetwork()
-            } label: {
-                Label("刷新设备", systemImage: "arrow.clockwise")
-            }
-            .buttonStyle(.borderless)
-            .disabled(store.scanningNetwork)
-            .help("重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
+        .padding(.vertical, 10)
         .animation(Theme.quick, value: store.scanning)
     }
 }

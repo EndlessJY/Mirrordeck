@@ -17,6 +17,23 @@
 
 #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
 
+// LANADB: the picture's size for the title bar (keeping the window to the
+// picture's proportions, and marking the picture area for screenshot tools).
+static struct sc_screen *lanadb_screen;
+void
+sc_lanadb_content_size_changed(void);
+
+bool
+sc_lanadb_content_size(int *width, int *height) {
+    if (!lanadb_screen || !lanadb_screen->content_size.width
+            || !lanadb_screen->content_size.height) {
+        return false;
+    }
+    *width = lanadb_screen->content_size.width;
+    *height = lanadb_screen->content_size.height;
+    return true;
+}
+
 static void
 set_aspect_ratio(struct sc_screen *screen, struct sc_size content_size) {
     assert(content_size.width && content_size.height);
@@ -592,6 +609,7 @@ sc_screen_init(struct sc_screen *screen,
                const struct sc_screen_params *params) {
     lanadb_screen = screen;
     screen->controller = params->controller;
+    lanadb_screen = screen;
 
     screen->resize_pending = false;
     screen->window_shown = false;
@@ -999,6 +1017,7 @@ set_content_size(struct sc_screen *screen, struct sc_size new_content_size,
     }
 
     screen->content_size = new_content_size;
+    sc_lanadb_content_size_changed();
 }
 
 static void
@@ -1264,6 +1283,7 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             screen->content_size = get_oriented_size(screen->frame_size,
                                                      screen->orientation);
             sc_screen_show_initial_window(screen);
+            sc_lanadb_content_size_changed();
 
             if (sc_screen_is_relative_mode(screen)) {
                 // Capture mouse on start

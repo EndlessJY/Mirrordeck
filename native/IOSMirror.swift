@@ -348,6 +348,12 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         overlay.frame = content.bounds
         overlay.autoresizingMask = [.width, .height]
         content.addSubview(overlay)
+        // The picture's area for screenshot tools that pick regions from the
+        // accessibility tree; the window keeps the picture's proportions, so
+        // it is the whole content.
+        let picture = IOSPictureArea(frame: content.bounds)
+        picture.autoresizingMask = [.width, .height]
+        content.addSubview(picture, positioned: .below, relativeTo: overlay)
         window.contentView = content
 
         let toolbar = NSTitlebarAccessoryViewController()
@@ -932,6 +938,20 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
 }
 
 // MARK: - Title bar and overlay
+
+/// The device picture, as an image in the accessibility tree; invisible, and
+/// clicks pass through.
+private final class IOSPictureArea: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .image }
+    override func accessibilityLabel() -> String? { "设备画面" }
+    override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        guard let window else { return nil }
+        let onScreen = window.convertToScreen(convert(bounds, to: nil))
+        return onScreen.contains(point) ? self : nil
+    }
+}
 
 /// The capture thumbnail; a click anywhere on it shows the file in Finder.
 private final class IOSThumbnailView: NSView {
