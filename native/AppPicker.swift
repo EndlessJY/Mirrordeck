@@ -173,6 +173,7 @@ struct AppPickerView: View {
                     }
                 }
                 .listStyle(.inset)
+                .scrollContentBackground(.hidden)
                 // Double-click (or Return on a row) opens it, as in Finder.
                 .contextMenu(forSelectionType: String.self) { _ in
                     EmptyView()

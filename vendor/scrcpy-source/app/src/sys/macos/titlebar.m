@@ -1317,8 +1317,22 @@ enum {
     __weak LANADBTitlebarController *weakSelf = self;
     panel.onClick = ^{ [weakSelf toggleHelp]; };
     panel.wantsLayer = YES;
-    panel.layer.backgroundColor = [NSColor colorWithWhite:0.08 alpha:0.86].CGColor;
     panel.layer.cornerRadius = 14;
+    panel.layer.masksToBounds = YES;
+    // Dark frosted glass (the HUD material), blurring the picture behind.
+    NSVisualEffectView *glass = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    glass.material = NSVisualEffectMaterialHUDWindow;
+    glass.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    glass.state = NSVisualEffectStateActive;
+    glass.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    glass.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel addSubview:glass];
+    [NSLayoutConstraint activateConstraints:@[
+        [glass.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
+        [glass.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
+        [glass.topAnchor constraintEqualToAnchor:panel.topAnchor],
+        [glass.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor],
+    ]];
     list.translatesAutoresizingMaskIntoConstraints = NO;
     [panel addSubview:list];
     [NSLayoutConstraint activateConstraints:@[

@@ -1104,7 +1104,7 @@ struct DeviceDetail: View {
             Button("恢复窗口默认位置") { WindowPlaces.forget(device.identity) }
                 .disabled(!WindowPlaces.has(device.identity))
         } label: {
-            Label("投屏选项", systemImage: "slider.horizontal.3")
+            Label("选项", systemImage: "slider.horizontal.3")
         }
         .menuStyle(.button)
         .fixedSize()
@@ -1165,6 +1165,7 @@ struct DeviceDetail: View {
         }
         .sheet(isPresented: $pickingApp) {
             AppPickerView(device: device, options: mirrorOptions)
+                .glassPanel()
         }
         // A different device starts at the top instead of the old scroll offset.
         .id(device.identity)
@@ -1233,7 +1234,7 @@ struct DeviceDetail: View {
             deviceOptionsMenu
             Spacer(minLength: 0)
         }
-        .controlSize(.large)
+        .controlSize(.regular)
     }
 
     /// Secondary tools beside the main mirror action.
@@ -1298,7 +1299,6 @@ struct DeviceDetail: View {
                 Text("正在启动投屏…").font(.callout).foregroundStyle(.secondary)
                     .fixedSize()
                 Button("取消") { stopMirror() }
-                    .controlSize(.large)
             }
             .transition(.opacity)
         case .live:
@@ -1307,7 +1307,6 @@ struct DeviceDetail: View {
             } label: {
                 Label("结束投屏", systemImage: "stop.fill")
             }
-            .controlSize(.large)
             .tint(theme.isAppleNative ? Theme.recording : nil)
             .help("关闭这台设备的投屏窗口")
             .transition(.opacity)
@@ -1320,10 +1319,8 @@ struct DeviceDetail: View {
                 }
             } label: {
                 Label(theme.isAppleNative ? "开始投屏" : "投屏", systemImage: "play.fill")
-                    .padding(.horizontal, 6)
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
             .tint(Theme.accent)
             .disabled(!device.connected)
             .keyboardShortcut(.defaultAction)
@@ -1949,6 +1946,9 @@ struct MirrorSettingsView: View {
         }
         .tint(Theme.accent)
         .frame(width: 540)
+        // Frosted glass behind every page; the forms drop their opaque fill.
+        .scrollContentBackground(.hidden)
+        .background(GlassBackground(material: .sidebar).ignoresSafeArea())
     }
 }
 
@@ -2407,6 +2407,7 @@ struct ContentView: View {
         }
         .sheet(item: $activeSheet) { request in
             ActionSheetView(mode: request.mode, suggestedEndpoint: request.endpoint)
+                .glassPanel()
                 .environmentObject(store)
         }
     }

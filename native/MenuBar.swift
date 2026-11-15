@@ -205,3 +205,29 @@ enum SettingsWindow {
         }
     }
 }
+
+/// macOS frosted glass (the material of sidebars and popovers): what is
+/// behind the window shows through, blurred, and follows light / dark mode.
+struct GlassBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .popover
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+    }
+}
+
+extension View {
+    /// A sheet or panel on frosted glass instead of the opaque window colour.
+    func glassPanel(_ material: NSVisualEffectView.Material = .popover) -> some View {
+        background(GlassBackground(material: material).ignoresSafeArea())
+            .presentationBackground(.clear)
+    }
+}
