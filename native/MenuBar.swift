@@ -92,6 +92,7 @@ struct MenuBarContent: View {
 
 extension Notification.Name {
     static let showCaptureHistory = Notification.Name("uk.agpt.lanadbmanager.showCaptureHistory")
+    static let toggleCaptureHistory = Notification.Name("uk.agpt.lanadbmanager.toggleCaptureHistory")
 }
 
 enum MenuBarActions {
@@ -316,4 +317,102 @@ extension NSScroller {
 
 extension NSScrollView {
     @objc func lanadb_scrollerStyle() -> NSScroller.Style { .overlay }
+}
+
+/// Glass icon buttons drawn by the app in the title bar row, outside the
+/// system toolbar: the toolbar re-lays itself out while the sidebar slides
+/// (its buttons fade, shift, and a » overflow button can appear), these do not.
+struct TitleBarIconButton: View {
+    let symbol: String
+    let help: String
+    var spinning = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13.5, weight: .regular))
+                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
+                           value: spinning)
+                .frame(width: 30, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary.opacity(0.75))
+        .help(help)
+    }
+}
+
+/// One glass capsule around a few title bar icons (macOS 26 Liquid Glass,
+/// a frosted capsule before that).
+struct TitleBarGlassGroup<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        let row = HStack(spacing: 2) { content }.padding(.horizontal, 3)
+        if #available(macOS 26.0, *) {
+            row.glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            row.background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        }
+    }
+}
+
+/// Recent captures and Settings, pinned to the right end of the main
+/// window's title bar as an AppKit title bar accessory. Kept out of the
+/// SwiftUI toolbar on purpose: toolbar items are re-laid out on every frame
+/// of the sidebar animation (they drift, fade and collapse into a » menu),
+/// while an accessory stays put and still takes clicks.
+struct TitleBarTrailingButtons: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = InstallerView()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class InstallerView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, !window.titlebarAccessoryViewControllers.contains(where: {
+                $0.identifier == TitleBarTrailingButtons.id
+            }) else { return }
+            let host = NSHostingView(rootView: TitleBarTrailingContent())
+            host.frame.size = host.fittingSize
+            let holder = NSView(frame: NSRect(x: 0, y: 0, width: host.fittingSize.width + 10, height: 40))
+            host.translatesAutoresizingMaskIntoConstraints = false
+            holder.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.leadingAnchor.constraint(equalTo: holder.leadingAnchor),
+                host.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+            ])
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.identifier = TitleBarTrailingButtons.id
+            accessory.layoutAttribute = .trailing
+            accessory.view = holder
+            window.addTitlebarAccessoryViewController(accessory)
+        }
+    }
+
+    static let id = NSUserInterfaceItemIdentifier("uk.agpt.lanadbmanager.titlebarTrailing")
+}
+
+private struct TitleBarTrailingContent: View {
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        TitleBarGlassGroup {
+            TitleBarIconButton(symbol: "photo.stack", help: "最近捕获：最近的截图、录屏和动图，可直接拖进聊天窗口") {
+                NotificationCenter.default.post(name: .toggleCaptureHistory, object: nil)
+            }
+            .accessibilityLabel("最近捕获")
+            TitleBarIconButton(symbol: "gearshape", help: "设置（⌘,）") {
+                SettingsWindow.show(openSettings)
+            }
+            .accessibilityLabel("设置")
+        }
+        .padding(.vertical, 4)
+    }
 }

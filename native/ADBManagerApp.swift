@@ -2288,6 +2288,19 @@ struct ContentView: View {
         store.report?.issues.first { $0.id == store.selectedID }
     }
 
+    private var refreshItem: some ToolbarContent {
+        ToolbarItem {
+            Button {
+                store.scanNetwork()
+            } label: {
+                Label("刷新设备", systemImage: "arrow.clockwise")
+                    .spinning(store.scanningNetwork)
+            }
+            .disabled(store.scanningNetwork)
+            .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
+        }
+    }
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
             // Rows draw their own selection; List's native highlight would sit
@@ -2310,9 +2323,7 @@ struct ContentView: View {
                         } header: {
                             SidebarHeader(title: theme.isAppleNative ? "已连接设备" : "设备",
                                           count: report.devices.count,
-                                          searching: !store.initialSweepDone,
-                                          refresh: { store.scanNetwork() },
-                                          refreshing: store.scanningNetwork)
+                                          searching: !store.initialSweepDone)
                         }
                     }
                     if let issues = store.report?.issues, !issues.isEmpty {
@@ -2339,6 +2350,15 @@ struct ContentView: View {
                 .onKeyPress(.downArrow) { moveSelection(1, proxy: proxy) }
                 .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
                 .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
+            }
+            // Refresh in the sidebar's own toolbar, left of the sidebar button;
+            // only the sidebar button stays when the sidebar is closed.
+            .toolbar {
+                if #available(macOS 15.0, *) {
+                    refreshItem.hidden(columns == .detailOnly)
+                } else {
+                    refreshItem
+                }
             }
             // The app's name in the title bar row of the sidebar, right after the
             // window buttons (plain text, not a toolbar button).
@@ -2403,21 +2423,9 @@ struct ContentView: View {
             }
             .animation(.easeInOut(duration: 0.18), value: store.selectedID)
             .navigationTitle("幕台")
-            .toolbar {
-                // Without a centred title the buttons would sit on the left.
-                if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.flexible, placement: .primaryAction)
-                }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button { showingHistory.toggle() } label: {
-                        Label("最近捕获", systemImage: "photo.stack")
-                    }
-                    .help("最近的截图、录屏和动图，可直接拖进聊天窗口")
-                    Button { SettingsWindow.show(openSettings) } label: {
-                        Label("设置", systemImage: "gearshape")
-                    }
-                    .help("设置（⌘,）")
-                }
+            .background(TitleBarTrailingButtons().frame(width: 0, height: 0))
+            .onReceive(NotificationCenter.default.publisher(for: .toggleCaptureHistory)) { _ in
+                showingHistory.toggle()
             }
             .onReceive(NotificationCenter.default.publisher(for: .showCaptureHistory)) { _ in
                 showingHistory = true
@@ -2583,6 +2591,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             timer.invalidate()
             self?.idleTimer = nil
             NSApp.terminate(nil)
+        }
+    }
+}
+
+private extension View {
+    /// Turns the symbol while a scan runs (macOS 15 and later).
+    @ViewBuilder func spinning(_ active: Bool) -> some View {
+        if #available(macOS 15.0, *) {
+            symbolEffect(.rotate, isActive: active)
+        } else {
+            self
         }
     }
 }
