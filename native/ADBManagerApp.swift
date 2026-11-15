@@ -1081,7 +1081,6 @@ struct DeviceDetail: View {
 
     @ObservedObject private var prefs = DevicePrefsStore.shared
     /// Two columns of cards fit (each needs about 270 points).
-    @State private var wideLayout = true
 
     /// This device's own mirror settings, next to the mirror button.
     private var deviceOptionsMenu: some View {
@@ -1116,8 +1115,6 @@ struct DeviceDetail: View {
             Toggle("连接后自动投屏", isOn: Binding(
                 get: { current.autoMirror },
                 set: { value in prefs.update(device.identity) { $0.autoMirror = value } }))
-            Button("恢复窗口默认位置") { WindowPlaces.forget(device.identity) }
-                .disabled(!WindowPlaces.has(device.identity))
         } label: {
             Label("选项", systemImage: "slider.horizontal.3")
         }
@@ -1173,13 +1170,6 @@ struct DeviceDetail: View {
                 infoSection
             }
             .frame(maxWidth: 780, alignment: .leading)
-            // One or two columns from the live width; switched at once (no
-            // cross-fade between the two layouts while the sidebar slides).
-            .onGeometryChange(for: Bool.self) { $0.size.width >= 560 } action: { wide in
-                var instant = Transaction()
-                instant.disablesAnimations = true
-                withTransaction(instant) { wideLayout = wide }
-            }
             .padding(Theme.pagePadding)
             .frame(maxWidth: .infinity, alignment: .topLeading)
             .animation(Theme.quick, value: mirrorState)
@@ -1361,18 +1351,9 @@ struct DeviceDetail: View {
     @ViewBuilder
     private var nativeTelemetryStrip: some View {
         if let storage = storageOverview {
-            if wideLayout {
-                HStack(alignment: .top, spacing: 16) {
-                    nativeStorageCard(storage)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    nativeConnectionsCard
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 16) {
-                    nativeStorageCard(storage)
-                    nativeConnectionsCard
-                }
+            BalancedColumns(spacing: 16, rowSpacing: 16, twoColumnWidth: 560) {
+                nativeStorageCard(storage)
+                nativeConnectionsCard
             }
         } else {
             nativeConnectionsCard
@@ -1564,18 +1545,6 @@ struct DeviceDetail: View {
         return sections
     }
 
-    /// Splits sections over two columns so both end at about the same height.
-    private func balancedColumns(_ sections: [DeviceInfoSection]) -> [[DeviceInfoSection]] {
-        var columns: [[DeviceInfoSection]] = [[], []]
-        var heights = [0, 0]
-        for section in sections {
-            let target = heights[0] <= heights[1] ? 0 : 1
-            columns[target].append(section)
-            heights[target] += section.items.count + 2
-        }
-        return columns
-    }
-
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
@@ -1613,35 +1582,24 @@ struct DeviceDetail: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                let columns = balancedColumns(sections)
-                // Two columns when the window is wide enough keep the list short.
-                // Decided from the width once (not ViewThatFits, which lays out
-                // both versions on every frame of the sidebar animation).
-                Group {
-                    if wideLayout {
-                        HStack(alignment: .top, spacing: 16) {
-                            ForEach(0..<2, id: \.self) { index in
-                                infoColumn(columns[index])
-                                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                            }
-                        }
-                    } else {
-                        infoColumn(sections)
+                // Two columns when there is room keep the list short. The
+                // layout itself picks one or two columns from the width it is
+                // given, so the cards are only moved, never rebuilt, while the
+                // sidebar slides (rebuilding them cost a ~80 ms frame).
+                BalancedColumns(spacing: 16, rowSpacing: 18, twoColumnWidth: 560) {
+                    ForEach(sections) { section in
+                        infoCard(section)
                     }
                 }
             }
         }
     }
 
-    private func infoColumn(_ sections: [DeviceInfoSection]) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ForEach(sections) { section in
-                Card(title: section.title) {
-                    ForEach(Array(section.items.enumerated()), id: \.element.label) { index, item in
-                        if index > 0 { CardDivider() }
-                        InfoRow(item: item)
-                    }
-                }
+    private func infoCard(_ section: DeviceInfoSection) -> some View {
+        Card(title: section.title) {
+            ForEach(Array(section.items.enumerated()), id: \.element.label) { index, item in
+                if index > 0 { CardDivider() }
+                InfoRow(item: item)
             }
         }
     }
@@ -2275,11 +2233,6 @@ struct ContentView: View {
     @State private var showingHistory = false
     @ObservedObject private var theme = ThemeStore.shared
     @State private var activeSheet: ActionRequest?
-    /// The sidebar stays closed until the first scan has a result, then
-    /// slides open, so launch shows one calm loading state instead of an
-    /// empty column.
-    @State private var columns: NavigationSplitViewVisibility = .detailOnly
-    @FocusState private var sidebarFocused: Bool
 
     private var selectedDevice: ADBDevice? {
         store.report?.devices.first { "device:" + $0.identity == store.selectedID }
@@ -2288,155 +2241,69 @@ struct ContentView: View {
         store.report?.issues.first { $0.id == store.selectedID }
     }
 
-    private var refreshItem: some ToolbarContent {
-        ToolbarItem {
-            Button {
-                store.scanNetwork()
-            } label: {
-                Label("刷新设备", systemImage: "arrow.clockwise")
-                    .spinning(store.scanningNetwork)
+    private var detailColumn: some View {
+        ZStack {
+            if let device = selectedDevice {
+                DeviceDetail(device: device)
+                    .id("device:" + device.identity)
+                    .transition(.opacity)
+            } else if let issue = selectedIssue {
+                IssueDetail(issue: issue,
+                            connect: { activeSheet = ActionRequest(mode: .connect, endpoint: $0) },
+                            pair: { activeSheet = ActionRequest(mode: .pair, endpoint: $0) },
+                            forget: { store.forget(endpoint: $0) })
+                    .id(issue.id)
+                    .transition(.opacity)
+            } else if let report = store.report,
+                      report.devices.isEmpty && report.issues.isEmpty {
+                ContentUnavailableView {
+                    Label("没有发现设备", systemImage: "smartphone")
+                } description: {
+                    Text("用 USB 连接设备，或让设备与 Mac 处于同一局域网并打开无线调试。设备出现后会自动显示。")
+                }
+            } else if store.report == nil, let error = store.error, !store.scanning {
+                ContentUnavailableView {
+                    Label("扫描失败", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button("重新扫描") { store.scan(full: false) }
+                        .buttonStyle(.borderedProminent)
+                }
+            } else if store.report == nil {
+                // The only progress shown before the first result.
+                VStack(spacing: 16) {
+                    IconTile(symbol: "dot.radiowaves.left.and.right", size: 64, style: .gradient)
+                        .symbolEffect(.variableColor.iterative, options: .repeating)
+                    Text("正在发现设备…").font(.title3.weight(.medium))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView("选择一台设备", systemImage: "smartphone",
+                                       description: Text("设备的连接、状态和详细信息会显示在这里。"))
             }
-            .disabled(store.scanningNetwork)
-            .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
         }
+        .animation(.easeInOut(duration: 0.18), value: store.selectedID)
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columns) {
-            // Rows draw their own selection; List's native highlight would sit
-            // underneath as a second, differently coloured layer.
-            ScrollViewReader { proxy in
-                List {
-                    if let report = store.report, !report.devices.isEmpty {
-                        Section {
-                            ForEach(report.devices) { device in
-                                let id = "device:" + device.identity
-                                DeviceSidebarRow(device: device, selected: store.selectedID == id)
-                                    .id(id)
-                                    .onTapGesture {
-                                        store.selectedID = id
-                                        sidebarFocused = true
-                                    }
-                                    .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
-                                    .listRowBackground(Color.clear)
-                            }
-                        } header: {
-                            SidebarHeader(title: theme.isAppleNative ? "已连接设备" : "设备",
-                                          count: report.devices.count,
-                                          searching: !store.initialSweepDone)
-                        }
-                    }
-                    if let issues = store.report?.issues, !issues.isEmpty {
-                        Section {
-                            ForEach(issues) { issue in
-                                IssueSidebarRow(issue: issue, selected: store.selectedID == issue.id)
-                                    .id(issue.id)
-                                    .onTapGesture {
-                                        store.selectedID = issue.id
-                                        sidebarFocused = true
-                                    }
-                                    .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
-                                    .listRowBackground(Color.clear)
-                            }
-                        } header: {
-                            SidebarHeader(title: "需要处理", count: issues.count)
-                        }
-                    }
-                }
-                .listStyle(.sidebar)
-                .focusable()
-                .focused($sidebarFocused)
-                .focusEffectDisabled()
-                .onKeyPress(.downArrow) { moveSelection(1, proxy: proxy) }
-                .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
-                .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
-            }
-            // Refresh in the sidebar's own toolbar, left of the sidebar button;
-            // only the sidebar button stays when the sidebar is closed.
-            .toolbar {
-                if #available(macOS 15.0, *) {
-                    refreshItem.hidden(columns == .detailOnly)
-                } else {
-                    refreshItem
-                }
-            }
-            // The app's name in the title bar row of the sidebar, right after the
-            // window buttons (plain text, not a toolbar button).
-            .overlay(alignment: .topLeading) {
-                Text("幕台")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 84)
-                    .padding(.top, 12)
-                    .ignoresSafeArea(edges: .top)
-                    .allowsHitTesting(false)
-            }
-            // Connection status at the foot of the device list; refresh next to
-            // the sidebar button, where the list it refreshes is.
-            .safeAreaInset(edge: .bottom) {
-                if store.report != nil || store.error != nil {
-                    statusBar
-                }
-            }
-            .navigationSplitViewColumnWidth(min: 240, ideal: 270)
-        } detail: {
-            ZStack {
-                if let device = selectedDevice {
-                    DeviceDetail(device: device)
-                        .id("device:" + device.identity)
-                        .transition(.opacity)
-                } else if let issue = selectedIssue {
-                    IssueDetail(issue: issue,
-                                connect: { activeSheet = ActionRequest(mode: .connect, endpoint: $0) },
-                                pair: { activeSheet = ActionRequest(mode: .pair, endpoint: $0) },
-                                forget: { store.forget(endpoint: $0) })
-                        .id(issue.id)
-                        .transition(.opacity)
-                } else if let report = store.report,
-                          report.devices.isEmpty && report.issues.isEmpty {
-                    ContentUnavailableView {
-                        Label("没有发现设备", systemImage: "smartphone")
-                    } description: {
-                        Text("用 USB 连接设备，或让设备与 Mac 处于同一局域网并打开无线调试。设备出现后会自动显示。")
-                    }
-                } else if store.report == nil, let error = store.error, !store.scanning {
-                    ContentUnavailableView {
-                        Label("扫描失败", systemImage: "exclamationmark.triangle")
-                    } description: {
-                        Text(error)
-                    } actions: {
-                        Button("重新扫描") { store.scan(full: false) }
-                            .buttonStyle(.borderedProminent)
-                    }
-                } else if store.report == nil {
-                    // The only progress shown before the first result.
-                    VStack(spacing: 16) {
-                        IconTile(symbol: "dot.radiowaves.left.and.right", size: 64, style: .gradient)
-                            .symbolEffect(.variableColor.iterative, options: .repeating)
-                        Text("正在发现设备…").font(.title3.weight(.medium))
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ContentUnavailableView("选择一台设备", systemImage: "smartphone",
-                                           description: Text("设备的连接、状态和详细信息会显示在这里。"))
-                }
-            }
-            .animation(.easeInOut(duration: 0.18), value: store.selectedID)
-            .navigationTitle("幕台")
+        // The sidebar and the main area in AppKit's own split view (see
+        // SplitColumns): NavigationSplitView re-synced its column state a few
+        // frames into opening the sidebar and snapped it to its end, so the
+        // slide jumped; AppKit's sidebar animation is smooth both ways.
+        SplitColumns(sidebar: SidebarColumn().tint(Theme.accent),
+                     detail: detailColumn.tint(Theme.accent))
+            .ignoresSafeArea()
             .background(TitleBarTrailingButtons().frame(width: 0, height: 0))
+            .background(TitleBarLeadingButtons().frame(width: 0, height: 0))
             .onReceive(NotificationCenter.default.publisher(for: .toggleCaptureHistory)) { _ in
                 showingHistory.toggle()
             }
             .onReceive(NotificationCenter.default.publisher(for: .showCaptureHistory)) { _ in
                 showingHistory = true
             }
-        }
-        .tint(Theme.accent)
-        .frame(minWidth: 720, minHeight: 500)
-        .onChange(of: store.report != nil) { _, ready in
-            guard ready, columns == .detailOnly else { return }
-            withAnimation(.spring(duration: 0.45, bounce: 0.12)) { columns = .all }
-        }
+            .tint(Theme.accent)
+            .frame(minWidth: 720, minHeight: 500)
         // Inside the main window, on the same glass as the other panels.
         .sheet(isPresented: $showingHistory) {
             CaptureHistoryView().glassPanel()
@@ -2445,6 +2312,72 @@ struct ContentView: View {
             ActionSheetView(mode: request.mode, suggestedEndpoint: request.endpoint)
                 .glassPanel()
                 .environmentObject(store)
+        }
+    }
+}
+
+/// The device list with its status line, in the split view's sidebar.
+struct SidebarColumn: View {
+    @ObservedObject private var store = DeviceStore.shared
+    @ObservedObject private var updates = UpdateChecker.shared
+    @ObservedObject private var theme = ThemeStore.shared
+    @FocusState private var sidebarFocused: Bool
+
+    var body: some View {
+        // Rows draw their own selection; List's native highlight would sit
+        // underneath as a second, differently coloured layer.
+        ScrollViewReader { proxy in
+            List {
+                if let report = store.report, !report.devices.isEmpty {
+                    Section {
+                        ForEach(report.devices) { device in
+                            let id = "device:" + device.identity
+                            DeviceSidebarRow(device: device, selected: store.selectedID == id)
+                                .id(id)
+                                .onTapGesture {
+                                    store.selectedID = id
+                                    sidebarFocused = true
+                                }
+                                .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                                .listRowBackground(Color.clear)
+                        }
+                    } header: {
+                        SidebarHeader(title: theme.isAppleNative ? "已连接设备" : "设备",
+                                      count: report.devices.count,
+                                      searching: !store.initialSweepDone)
+                    }
+                }
+                if let issues = store.report?.issues, !issues.isEmpty {
+                    Section {
+                        ForEach(issues) { issue in
+                            IssueSidebarRow(issue: issue, selected: store.selectedID == issue.id)
+                                .id(issue.id)
+                                .onTapGesture {
+                                    store.selectedID = issue.id
+                                    sidebarFocused = true
+                                }
+                                .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                                .listRowBackground(Color.clear)
+                        }
+                    } header: {
+                        SidebarHeader(title: "需要处理", count: issues.count)
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .focusable()
+            .focused($sidebarFocused)
+            .focusEffectDisabled()
+            .onKeyPress(.downArrow) { moveSelection(1, proxy: proxy) }
+            .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
+            .animation(Theme.quick, value: store.report?.devices.map(\.identity) ?? [])
+        }
+        // Connection status at the foot of the device list; refresh next to
+        // the sidebar button, where the list it refreshes is.
+        .safeAreaInset(edge: .bottom) {
+            if store.report != nil || store.error != nil {
+                statusBar
+            }
         }
     }
 
@@ -2478,6 +2411,18 @@ struct ContentView: View {
                     .lineLimit(2)
                     .contentTransition(.opacity)
                     .help(store.error ?? store.phase)
+                Spacer(minLength: 6)
+                // Refresh at the foot of the list it refreshes, one size
+                // smaller than the title bar buttons.
+                TitleBarGlassGroup {
+                    TitleBarIconButton(symbol: "arrow.clockwise",
+                                       help: "刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）",
+                                       spinning: store.scanningNetwork, small: true) {
+                        store.scanNetwork()
+                    }
+                    .disabled(store.scanningNetwork)
+                    .accessibilityLabel("刷新设备")
+                }
             }
             if let release = updates.available {
                 Button {
@@ -2595,13 +2540,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private extension View {
-    /// Turns the symbol while a scan runs (macOS 15 and later).
-    @ViewBuilder func spinning(_ active: Bool) -> some View {
-        if #available(macOS 15.0, *) {
-            symbolEffect(.rotate, isActive: active)
-        } else {
-            self
+
+/// Children in one column, or — from `twoColumnWidth` up — in two columns,
+/// each child going to the shorter one so both end at about the same height.
+/// Decided inside layout from the offered width, so a sliding sidebar only
+/// moves the children; no view state changes and nothing is rebuilt.
+struct BalancedColumns: Layout {
+    var spacing: CGFloat
+    var rowSpacing: CGFloat
+    var twoColumnWidth: CGFloat
+
+    private func arrange(_ width: CGFloat, _ subviews: Subviews) -> (frames: [CGRect], height: CGFloat) {
+        let two = width >= twoColumnWidth && subviews.count > 1
+        let columnWidth = two ? (width - spacing) / 2 : width
+        var heights: [CGFloat] = two ? [0, 0] : [0]
+        var frames: [CGRect] = []
+        for subview in subviews {
+            let column = two && heights[1] < heights[0] ? 1 : 0
+            let size = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
+            let y = heights[column] == 0 ? 0 : heights[column] + rowSpacing
+            frames.append(CGRect(x: CGFloat(column) * (columnWidth + spacing), y: y,
+                                 width: columnWidth, height: size.height))
+            heights[column] = y + size.height
         }
+        return (frames, heights.max() ?? 0)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? twoColumnWidth
+        return CGSize(width: width, height: arrange(width, subviews).height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = arrange(bounds.width, subviews).frames
+        for (subview, frame) in zip(subviews, frames) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          proposal: ProposedViewSize(width: frame.width, height: frame.height))
+        }
+    }
+}
+
+/// The sidebar and the main area in AppKit's split view, each a SwiftUI view.
+/// The sidebar is a real sidebar item: full height under the title bar, the
+/// system sidebar material, and AppKit's own slide when it is shown or hidden
+/// (TitleBarLeadingButtons calls `toggleSidebar`).
+struct SplitColumns<Sidebar: View, Detail: View>: NSViewControllerRepresentable {
+    let sidebar: Sidebar
+    let detail: Detail
+
+    func makeNSViewController(context: Context) -> NSSplitViewController {
+        let controller = NSSplitViewController()
+        let side = NSHostingController(rootView: sidebar)
+        side.sizingOptions = []
+        side.view.frame = NSRect(x: 0, y: 0, width: 240, height: 500)
+        let sideItem = NSSplitViewItem(sidebarWithViewController: side)
+        sideItem.minimumThickness = 240
+        sideItem.maximumThickness = 360
+        sideItem.canCollapse = true
+        sideItem.allowsFullHeightLayout = true
+        // Closed at launch until the first scan has a result.
+        sideItem.isCollapsed = DeviceStore.shared.report == nil
+        let main = NSHostingController(rootView: detail)
+        main.sizingOptions = []
+        let mainItem = NSSplitViewItem(viewController: main)
+        mainItem.minimumThickness = 420
+        controller.addSplitViewItem(sideItem)
+        controller.addSplitViewItem(mainItem)
+        return controller
+    }
+
+    func updateNSViewController(_ controller: NSSplitViewController, context: Context) {
+        (controller.splitViewItems.first?.viewController as? NSHostingController<Sidebar>)?.rootView = sidebar
+        (controller.splitViewItems.last?.viewController as? NSHostingController<Detail>)?.rootView = detail
     }
 }

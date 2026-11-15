@@ -1,3 +1,4 @@
+import Combine
 import AppKit
 import SwiftUI
 
@@ -326,16 +327,18 @@ struct TitleBarIconButton: View {
     let symbol: String
     let help: String
     var spinning = false
+    /// The smaller size, for the sidebar's foot.
+    var small = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 13.5, weight: .regular))
+                .font(.system(size: small ? 11 : 13.5, weight: .regular))
                 .rotationEffect(.degrees(spinning ? 360 : 0))
                 .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
                            value: spinning)
-                .frame(width: 30, height: 28)
+                .frame(width: small ? 24 : 30, height: small ? 22 : 28)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -414,5 +417,156 @@ private struct TitleBarTrailingContent: View {
             .accessibilityLabel("设置")
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// What the leading title bar view shows; set from AppKit.
+final class TitleBarLeadingModel: ObservableObject {
+    @Published var sidebarShown = false
+}
+
+/// The sidebar button and the app's name at the start of the main area: right
+/// after the window buttons while the sidebar is closed, at the sidebar's edge
+/// while it is open, and following that edge on every frame of the slide.
+///
+/// An AppKit view in the title bar (SwiftUI overlays there draw but take no
+/// clicks; toolbar items are re-laid out on each frame of the slide). The
+/// button runs the split view's own sidebar animation, so opening and closing
+/// share one smooth curve (a SwiftUI-driven change of the column visibility
+/// slid part of the way and then jumped when opening).
+struct TitleBarLeadingButtons: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { InstallerView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    static let id = NSUserInterfaceItemIdentifier("uk.agpt.lanadbmanager.titlebarLeading")
+    /// Left end of the button while the sidebar is closed (after the window
+    /// buttons).
+    static let collapsedX: CGFloat = 80
+
+    private final class InstallerView: NSView {
+        private let model = TitleBarLeadingModel()
+        private var host: NSView?
+        private weak var split: NSSplitView?
+        private var observers: [NSObjectProtocol] = []
+        private var ready: AnyCancellable?
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard host == nil, let window,
+                  let titlebar = window.standardWindowButton(.closeButton)?.superview,
+                  !titlebar.subviews.contains(where: { $0.identifier == TitleBarLeadingButtons.id })
+            else { return }
+            let host = NSHostingView(rootView: TitleBarLeadingContent(model: model) { [weak self] in
+                self?.toggleSidebar()
+            })
+            host.identifier = TitleBarLeadingButtons.id
+            host.frame.size = host.fittingSize
+            titlebar.addSubview(host)
+            self.host = host
+            observers.append(NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: titlebar, queue: .main) { [weak self] _ in
+                    self?.place()
+                })
+            titlebar.postsFrameChangedNotifications = true
+            // The split view is in place once this layout pass is done.
+            DispatchQueue.main.async { [weak self] in self?.attach() }
+        }
+
+        private func attach() {
+            guard let content = window?.contentView, let split = Self.findSplit(in: content) else { return }
+            self.split = split
+            // Closed at launch until the first scan has a result, then slides
+            // open: one calm loading state instead of an empty column.
+            if DeviceStore.shared.report == nil,
+               let item = (split.delegate as? NSSplitViewController)?.splitViewItems.first {
+                item.isCollapsed = true
+                ready = DeviceStore.shared.$report.first { $0 != nil }.receive(on: DispatchQueue.main)
+                    .sink { [weak self] _ in
+                        guard let controller = self?.split?.delegate as? NSSplitViewController,
+                              controller.splitViewItems.first?.isCollapsed == true else { return }
+                        controller.toggleSidebar(nil)
+                    }
+            }
+            observers.append(NotificationCenter.default.addObserver(
+                forName: NSSplitView.didResizeSubviewsNotification, object: split, queue: .main) { [weak self] _ in
+                    self?.place()
+                })
+            for view in split.arrangedSubviews.prefix(1) {
+                view.postsFrameChangedNotifications = true
+                observers.append(NotificationCenter.default.addObserver(
+                    forName: NSView.frameDidChangeNotification, object: view, queue: .main) { [weak self] _ in
+                        self?.place()
+                    })
+            }
+            place()
+        }
+
+        private static func findSplit(in view: NSView) -> NSSplitView? {
+            if let split = view as? NSSplitView { return split }
+            for sub in view.subviews {
+                if let found = findSplit(in: sub) { return found }
+            }
+            return nil
+        }
+
+        /// The sidebar's right edge in window points (0 when closed).
+        private var sidebarEdge: CGFloat {
+            guard let split, let sidebar = split.arrangedSubviews.first, !sidebar.isHidden,
+                  sidebar.frame.width > 1 else { return 0 }
+            return split.convert(sidebar.frame, to: nil).maxX
+        }
+
+        private func place() {
+            guard let host, let titlebar = host.superview else { return }
+            let edge = sidebarEdge
+            let shown = edge > 1
+            if model.sidebarShown != shown { model.sidebarShown = shown }
+            let size = host.fittingSize
+            let close = window?.standardWindowButton(.closeButton)
+            let midY = close.map { titlebar.convert($0.frame, from: $0.superview).midY } ?? titlebar.bounds.midY
+            let origin = NSPoint(x: round(max(TitleBarLeadingButtons.collapsedX, edge + 10)),
+                                 y: round(midY - size.height / 2))
+            if host.frame.origin != origin || host.frame.size != size {
+                host.frame = NSRect(origin: origin, size: size)
+            }
+            // The full-height sidebar adds its own views to the title bar when
+            // it opens or closes; stay on top of them so clicks reach us.
+            if titlebar.subviews.last !== host {
+                titlebar.addSubview(host, positioned: .above, relativeTo: nil)
+            }
+        }
+
+        private func toggleSidebar() {
+            guard let controller = split?.delegate as? NSSplitViewController else {
+                NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil)
+                return
+            }
+            controller.toggleSidebar(nil)
+        }
+    }
+}
+
+private struct TitleBarLeadingContent: View {
+    @ObservedObject var model: TitleBarLeadingModel
+    let toggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            TitleBarGlassGroup {
+                TitleBarIconButton(symbol: "sidebar.left",
+                                   help: model.sidebarShown ? "隐藏边栏（⌃⌘S）" : "显示边栏（⌃⌘S）",
+                                   action: toggle)
+                    .keyboardShortcut("s", modifiers: [.control, .command])
+                    .accessibilityLabel(model.sidebarShown ? "隐藏边栏" : "显示边栏")
+            }
+            Text("幕台")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+        .padding(.vertical, 2)
+        .fixedSize()
     }
 }

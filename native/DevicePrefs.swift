@@ -70,17 +70,6 @@ enum WindowPlaces {
         UserDefaults.standard.set(all, forKey: key)
     }
 
-    static func forget(_ id: String) {
-        var all = UserDefaults.standard.dictionary(forKey: key) as? [String: [Int]] ?? [:]
-        all = all.filter { $0.key != id && !$0.key.hasPrefix(id + "|") }
-        UserDefaults.standard.set(all, forKey: key)
-    }
-
-    static func has(_ id: String) -> Bool {
-        let all = UserDefaults.standard.dictionary(forKey: key) as? [String: [Int]] ?? [:]
-        return all.keys.contains { $0 == id || $0.hasPrefix(id + "|") }
-    }
-
     /// scrcpy arguments for the saved place, when it is still on a screen
     /// (a display may have been unplugged since).
     static func arguments(_ id: String) -> [String] {
@@ -94,8 +83,9 @@ enum WindowPlaces {
             return shared.width >= 120 && shared.height >= 120
         }
         guard visible else { return [] }
-        return ["--window-x=\(place[0])", "--window-y=\(place[1])",
-                "--window-width=\(place[2])", "--window-height=\(place[3])"]
+        // Width only: scrcpy takes the height from the phone's proportions,
+        // so a stale or rotated size can never leave black bars.
+        return ["--window-x=\(place[0])", "--window-y=\(place[1])", "--window-width=\(place[2])"]
     }
 }
 

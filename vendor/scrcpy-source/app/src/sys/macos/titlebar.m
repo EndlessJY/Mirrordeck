@@ -1223,7 +1223,8 @@ enum {
         @"x": [NSString stringWithFormat:@"%ld", x],
         @"y": [NSString stringWithFormat:@"%ld", y],
         @"w": [NSString stringWithFormat:@"%ld", lround(content.size.width)],
-        @"h": [NSString stringWithFormat:@"%ld", lround(content.size.height)],
+        // The picture's own height, without the tool rows above it.
+        @"h": [NSString stringWithFormat:@"%ld", lround(NSHeight(content) - tools)],
     }];
 }
 
