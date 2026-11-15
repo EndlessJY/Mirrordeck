@@ -1069,6 +1069,9 @@ struct DeviceDetail: View {
     @ObservedObject private var prefs = DevicePrefsStore.shared
     /// Two columns of cards fit (each needs about 270 points).
     @State private var wideLayout = true
+    /// The page's width once it stopped changing (see the ScrollView body).
+    @State private var contentWidth: CGFloat?
+    @State private var widthSettle: DispatchWorkItem?
 
     /// This device's own mirror settings, next to the mirror button.
     private var deviceOptionsMenu: some View {
@@ -1159,12 +1162,32 @@ struct DeviceDetail: View {
                 }
                 infoSection
             }
-            .frame(maxWidth: 780, alignment: .leading)
-            .onGeometryChange(for: Bool.self) { $0.size.width >= 560 } action: { wideLayout = $0 }
+            // A settled width, not the live one: while the sidebar slides the
+            // page keeps its layout and only moves; it is laid out again once,
+            // when the width has stopped changing.
+            .frame(width: contentWidth.map { min(780, max(320, $0)) }, alignment: .leading)
+            .frame(maxWidth: contentWidth == nil ? 780 : nil, alignment: .leading)
             .padding(Theme.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            // minWidth 0: the settled width must not become the page's minimum,
+            // or the split view folds the sidebar away to make room for it.
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
+            .clipped()
             .animation(Theme.quick, value: mirrorState)
             .animation(Theme.quick, value: theme.style)
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width - Theme.pagePadding * 2 } action: { width in
+            widthSettle?.cancel()
+            guard contentWidth != nil else {
+                contentWidth = width
+                wideLayout = width >= 560
+                return
+            }
+            let work = DispatchWorkItem {
+                contentWidth = width
+                wideLayout = min(780, width) >= 560
+            }
+            widthSettle = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
         .sheet(isPresented: $pickingApp) {
             AppPickerView(device: device, options: mirrorOptions)
@@ -2333,23 +2356,31 @@ struct ContentView: View {
                 }
             }
             .toolbar {
-                // Only with the sidebar open: it refreshes the list shown there.
+                // Refresh and the sidebar button share one glass capsule, close
+                // together (the system's own sidebar button cannot join a group).
                 if columns != .detailOnly {
-                ToolbarItem {
-                    Button {
-                        store.scanNetwork()
-                    } label: {
-                        if store.scanningNetwork {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Label("刷新设备", systemImage: "arrow.clockwise")
-                        }
+                    // At the sidebar's right edge, clear of the name.
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.flexible)
                     }
-                    .disabled(store.scanningNetwork)
-                    .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
-                }
+                    ToolbarItemGroup {
+                        Button {
+                            store.scanNetwork()
+                        } label: {
+                            if store.scanningNetwork {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Label("刷新设备", systemImage: "arrow.clockwise")
+                            }
+                        }
+                        .disabled(store.scanningNetwork)
+                        .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
+                        sidebarButton
+                    }
                 }
             }
+            // Our sidebar button (grouped with Refresh) replaces the system one.
+            .toolbar(removing: .sidebarToggle)
             .navigationSplitViewColumnWidth(min: 240, ideal: 270)
         } detail: {
             ZStack {
@@ -2396,23 +2427,19 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.18), value: store.selectedID)
             .navigationTitle("幕台")
             .toolbar {
+                // The sidebar button stays reachable with the sidebar closed.
+                if columns == .detailOnly {
+                    ToolbarItem(placement: .navigation) { sidebarButton }
+                }
                 // Without a centred title the buttons would sit on the left.
                 if #available(macOS 26.0, *) {
                     ToolbarSpacer(.flexible, placement: .primaryAction)
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
                     Button { showingHistory.toggle() } label: {
                         Label("最近捕获", systemImage: "photo.stack")
                     }
                     .help("最近的截图、录屏和动图，可直接拖进聊天窗口")
-
-                }
-                // Each button its own round glass button, as on the sidebar
-                // side, instead of macOS 26 merging the two into one capsule.
-                if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.fixed, placement: .primaryAction)
-                }
-                ToolbarItem(placement: .primaryAction) {
                     Button { SettingsWindow.show(openSettings) } label: {
                         Label("设置", systemImage: "gearshape")
                     }
@@ -2456,6 +2483,19 @@ struct ContentView: View {
 
     /// The device list's foot: connection status, and a new version when
     /// there is one.
+    /// Shows or hides the sidebar (in place of the system button, so it can
+    /// share a capsule with Refresh).
+    private var sidebarButton: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.28)) {
+                columns = columns == .detailOnly ? .all : .detailOnly
+            }
+        } label: {
+            Label(columns == .detailOnly ? "显示边栏" : "隐藏边栏", systemImage: "sidebar.left")
+        }
+        .help(columns == .detailOnly ? "显示边栏" : "隐藏边栏")
+    }
+
     private var statusBar: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
