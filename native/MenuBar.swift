@@ -354,12 +354,22 @@ struct TitleBarGlassGroup<Content: View>: View {
 
     var body: some View {
         let row = HStack(spacing: 2) { content }.padding(.horizontal, 3)
+        // glassEffect needs the macOS 26 SDK (Swift 6.2); the release
+        // pipeline may build with an older one.
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             row.glassEffect(.regular.interactive(), in: Capsule())
         } else {
-            row.background(.regularMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+            frosted(row)
         }
+        #else
+        frosted(row)
+        #endif
+    }
+
+    private func frosted(_ row: some View) -> some View {
+        row.background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
     }
 }
 
