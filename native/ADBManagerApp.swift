@@ -821,6 +821,10 @@ struct SidebarHeader: View {
     /// nil before the first result: no number yet.
     let count: Int?
     var searching = false
+    /// A refresh button at the end of the heading (the device list's own
+    /// action: it shows and hides with the sidebar, the toolbar never changes).
+    var refresh: (() -> Void)? = nil
+    var refreshing = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -832,13 +836,22 @@ struct SidebarHeader: View {
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.secondary.opacity(0.15)))
             }
-            if searching {
-                Spacer()
-                ProgressView().controlSize(.mini)
-                Text("正在查找").font(.caption2)
+            // Scanning shows at the foot of the list; the heading stays quiet.
+            if let refresh {
+                Spacer(minLength: 4)
+                Button(action: refresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                        .rotationEffect(.degrees(refreshing ? 360 : 0))
+                        .animation(refreshing ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
+                                   value: refreshing)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .disabled(refreshing)
+                .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
             }
         }
-        .animation(Theme.quick, value: searching)
     }
 }
 
@@ -1183,8 +1196,10 @@ struct DeviceDetail: View {
                 return
             }
             let work = DispatchWorkItem {
-                contentWidth = width
-                wideLayout = min(780, width) >= 560
+                withAnimation(.easeOut(duration: 0.18)) {
+                    contentWidth = width
+                    wideLayout = min(780, width) >= 560
+                }
             }
             widthSettle = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
@@ -2309,7 +2324,9 @@ struct ContentView: View {
                         } header: {
                             SidebarHeader(title: theme.isAppleNative ? "已连接设备" : "设备",
                                           count: report.devices.count,
-                                          searching: !store.initialSweepDone)
+                                          searching: !store.initialSweepDone,
+                                          refresh: { store.scanNetwork() },
+                                          refreshing: store.scanningNetwork)
                         }
                     }
                     if let issues = store.report?.issues, !issues.isEmpty {
@@ -2355,32 +2372,6 @@ struct ContentView: View {
                     statusBar
                 }
             }
-            .toolbar {
-                // Refresh and the sidebar button share one glass capsule, close
-                // together (the system's own sidebar button cannot join a group).
-                if columns != .detailOnly {
-                    // At the sidebar's right edge, clear of the name.
-                    if #available(macOS 26.0, *) {
-                        ToolbarSpacer(.flexible)
-                    }
-                    ToolbarItemGroup {
-                        Button {
-                            store.scanNetwork()
-                        } label: {
-                            if store.scanningNetwork {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Label("刷新设备", systemImage: "arrow.clockwise")
-                            }
-                        }
-                        .disabled(store.scanningNetwork)
-                        .help("刷新设备：重新查找设备，包括局域网中开启了无线 ADB、但没有广播也没有连接过的设备（会探测本网段各地址的 ADB 端口）")
-                        sidebarButton
-                    }
-                }
-            }
-            // Our sidebar button (grouped with Refresh) replaces the system one.
-            .toolbar(removing: .sidebarToggle)
             .navigationSplitViewColumnWidth(min: 240, ideal: 270)
         } detail: {
             ZStack {
@@ -2427,10 +2418,6 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.18), value: store.selectedID)
             .navigationTitle("幕台")
             .toolbar {
-                // The sidebar button stays reachable with the sidebar closed.
-                if columns == .detailOnly {
-                    ToolbarItem(placement: .navigation) { sidebarButton }
-                }
                 // Without a centred title the buttons would sit on the left.
                 if #available(macOS 26.0, *) {
                     ToolbarSpacer(.flexible, placement: .primaryAction)
@@ -2483,19 +2470,6 @@ struct ContentView: View {
 
     /// The device list's foot: connection status, and a new version when
     /// there is one.
-    /// Shows or hides the sidebar (in place of the system button, so it can
-    /// share a capsule with Refresh).
-    private var sidebarButton: some View {
-        Button {
-            withAnimation(.snappy(duration: 0.28)) {
-                columns = columns == .detailOnly ? .all : .detailOnly
-            }
-        } label: {
-            Label(columns == .detailOnly ? "显示边栏" : "隐藏边栏", systemImage: "sidebar.left")
-        }
-        .help(columns == .detailOnly ? "显示边栏" : "隐藏边栏")
-    }
-
     private var statusBar: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 7) {
@@ -2538,6 +2512,10 @@ struct LANADBManagerApp: App {
     /// Not @AppStorage: an AppStorage here re-evaluates the whole app (and
     /// rebuilds the main menu) on every defaults write, which loops.
     @StateObject private var menuBar = MenuBarSettings.shared
+
+    init() {
+        OverlayScrollers.install()
+    }
 
     var body: some Scene {
         WindowGroup(id: "main") {

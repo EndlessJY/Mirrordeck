@@ -290,3 +290,30 @@ struct AccentSwitchStyle: ToggleStyle {
         Toggle(configuration).toggleStyle(.switch).tint(Theme.accent)
     }
 }
+
+/// Overlay scroll bars everywhere in the app: thin, shown only while
+/// scrolling, never taking width from the content. With a mouse connected
+/// macOS would otherwise use permanent bars, which also squeezed the device
+/// page under its right edge.
+enum OverlayScrollers {
+    static func install() {
+        // The app-wide answer AppKit asks when it lays out any scroll view.
+        if let original = class_getClassMethod(NSScroller.self, #selector(getter: NSScroller.preferredScrollerStyle)),
+           let replacement = class_getClassMethod(NSScroller.self, #selector(NSScroller.lanadb_preferredScrollerStyle)) {
+            method_exchangeImplementations(original, replacement)
+        }
+        // And on each scroll view, for those that ask for themselves.
+        if let original = class_getInstanceMethod(NSScrollView.self, #selector(getter: NSScrollView.scrollerStyle)),
+           let replacement = class_getInstanceMethod(NSScrollView.self, #selector(NSScrollView.lanadb_scrollerStyle)) {
+            method_exchangeImplementations(original, replacement)
+        }
+    }
+}
+
+extension NSScroller {
+    @objc class func lanadb_preferredScrollerStyle() -> NSScroller.Style { .overlay }
+}
+
+extension NSScrollView {
+    @objc func lanadb_scrollerStyle() -> NSScroller.Style { .overlay }
+}
