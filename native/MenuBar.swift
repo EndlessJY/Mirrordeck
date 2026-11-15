@@ -377,6 +377,7 @@ struct TitleBarTrailingButtons: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     private final class InstallerView: NSView {
+        private var reveal: AnyCancellable?
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard let window, !window.titlebarAccessoryViewControllers.contains(where: {
@@ -391,6 +392,7 @@ struct TitleBarTrailingButtons: NSViewRepresentable {
                 host.leadingAnchor.constraint(equalTo: holder.leadingAnchor),
                 host.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
             ])
+            reveal = TitleBarReveal.watch(holder)
             let accessory = NSTitlebarAccessoryViewController()
             accessory.identifier = TitleBarTrailingButtons.id
             accessory.layoutAttribute = .trailing
@@ -446,9 +448,11 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
     private final class InstallerView: NSView {
         private let model = TitleBarLeadingModel()
         private var host: NSView?
+        private var size = NSSize.zero
         private weak var split: NSSplitView?
         private var observers: [NSObjectProtocol] = []
         private var ready: AnyCancellable?
+        private var reveal: AnyCancellable?
 
         deinit { observers.forEach(NotificationCenter.default.removeObserver) }
 
@@ -458,10 +462,14 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
                   let titlebar = window.standardWindowButton(.closeButton)?.superview,
                   !titlebar.subviews.contains(where: { $0.identifier == TitleBarLeadingButtons.id })
             else { return }
+            // No line under the title bar.
+            window.titlebarSeparatorStyle = .none
+            window.toolbar?.showsBaselineSeparator = false
             let host = NSHostingView(rootView: TitleBarLeadingContent(model: model) { [weak self] in
                 self?.toggleSidebar()
             })
             host.identifier = TitleBarLeadingButtons.id
+            reveal = TitleBarReveal.watch(host)
             host.frame.size = host.fittingSize
             titlebar.addSubview(host)
             self.host = host
@@ -479,27 +487,16 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
             self.split = split
             // Closed at launch until the first scan has a result, then slides
             // open: one calm loading state instead of an empty column.
-            if DeviceStore.shared.report == nil,
-               let item = (split.delegate as? NSSplitViewController)?.splitViewItems.first {
-                item.isCollapsed = true
+            if let controller = split.delegate as? SidebarSplitController, !controller.isOpen {
                 ready = DeviceStore.shared.$report.first { $0 != nil }.receive(on: DispatchQueue.main)
                     .sink { [weak self] _ in
-                        guard let controller = self?.split?.delegate as? NSSplitViewController,
-                              controller.splitViewItems.first?.isCollapsed == true else { return }
-                        controller.toggleSidebar(nil)
+                        (self?.split?.delegate as? SidebarSplitController)?.setOpen(true)
                     }
             }
             observers.append(NotificationCenter.default.addObserver(
                 forName: NSSplitView.didResizeSubviewsNotification, object: split, queue: .main) { [weak self] _ in
                     self?.place()
                 })
-            for view in split.arrangedSubviews.prefix(1) {
-                view.postsFrameChangedNotifications = true
-                observers.append(NotificationCenter.default.addObserver(
-                    forName: NSView.frameDidChangeNotification, object: view, queue: .main) { [weak self] _ in
-                        self?.place()
-                    })
-            }
             place()
         }
 
@@ -523,7 +520,8 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
             let edge = sidebarEdge
             let shown = edge > 1
             if model.sidebarShown != shown { model.sidebarShown = shown }
-            let size = host.fittingSize
+            // Measured once: the content never changes size.
+            if size == .zero { size = host.fittingSize }
             let close = window?.standardWindowButton(.closeButton)
             let midY = close.map { titlebar.convert($0.frame, from: $0.superview).midY } ?? titlebar.bounds.midY
             let origin = NSPoint(x: round(max(TitleBarLeadingButtons.collapsedX, edge + 10)),
@@ -539,11 +537,7 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
         }
 
         private func toggleSidebar() {
-            guard let controller = split?.delegate as? NSSplitViewController else {
-                NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil)
-                return
-            }
-            controller.toggleSidebar(nil)
+            (split?.delegate as? SidebarSplitController)?.toggle()
         }
     }
 }
@@ -568,5 +562,28 @@ private struct TitleBarLeadingContent: View {
         }
         .padding(.vertical, 2)
         .fixedSize()
+    }
+}
+
+/// Title bar controls stay out of sight on the launch screen ("正在发现设备…")
+/// and fade in once the first scan has a result or has failed.
+enum TitleBarReveal {
+    static var isReady: Bool { DeviceStore.shared.report != nil || DeviceStore.shared.error != nil }
+
+    static func watch(_ view: NSView) -> AnyCancellable {
+        view.alphaValue = isReady ? 1 : 0
+        view.isHidden = !isReady
+        return DeviceStore.shared.$report.combineLatest(DeviceStore.shared.$error)
+            .map { $0 != nil || $1 != nil }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak view] ready in
+                guard let view, ready, view.isHidden else { return }
+                view.isHidden = false
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.25
+                    view.animator().alphaValue = 1
+                }
+            }
     }
 }

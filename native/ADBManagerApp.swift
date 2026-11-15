@@ -2304,6 +2304,9 @@ struct ContentView: View {
             }
             .tint(Theme.accent)
             .frame(minWidth: 720, minHeight: 500)
+            // No toolbar band (and no line under it) across the top of the
+            // main area.
+            .hiddenToolbarBackground()
         // Inside the main window, on the same glass as the other panels.
         .sheet(isPresented: $showingHistory) {
             CaptureHistoryView().glassPanel()
@@ -2581,36 +2584,167 @@ struct BalancedColumns: Layout {
 }
 
 /// The sidebar and the main area in AppKit's split view, each a SwiftUI view.
-/// The sidebar is a real sidebar item: full height under the title bar, the
-/// system sidebar material, and AppKit's own slide when it is shown or hidden
-/// (TitleBarLeadingButtons calls `toggleSidebar`).
+/// The sidebar is a real sidebar item (full height under the title bar, the
+/// system sidebar material); opening and closing it is SidebarSplitController's
+/// own slide.
 struct SplitColumns<Sidebar: View, Detail: View>: NSViewControllerRepresentable {
     let sidebar: Sidebar
     let detail: Detail
 
-    func makeNSViewController(context: Context) -> NSSplitViewController {
-        let controller = NSSplitViewController()
-        let side = NSHostingController(rootView: sidebar)
-        side.sizingOptions = []
-        side.view.frame = NSRect(x: 0, y: 0, width: 240, height: 500)
-        let sideItem = NSSplitViewItem(sidebarWithViewController: side)
-        sideItem.minimumThickness = 240
-        sideItem.maximumThickness = 360
-        sideItem.canCollapse = true
-        sideItem.allowsFullHeightLayout = true
+    func makeNSViewController(context: Context) -> SidebarSplitController {
         // Closed at launch until the first scan has a result.
-        sideItem.isCollapsed = DeviceStore.shared.report == nil
+        let open = DeviceStore.shared.report != nil
+        let controller = SidebarSplitController(open: open)
+        let side = NSHostingController(rootView: SlidingSidebar(slide: controller.slide, content: sidebar))
+        side.sizingOptions = []
+        side.view.frame = NSRect(x: 0, y: 0, width: open ? SidebarSplitController.defaultWidth : 0, height: 500)
+        let sideItem = NSSplitViewItem(sidebarWithViewController: side)
+        sideItem.minimumThickness = open ? SidebarSplitController.defaultWidth : 0
+        sideItem.maximumThickness = SidebarSplitController.maximumWidth
+        sideItem.canCollapse = false
+        sideItem.allowsFullHeightLayout = true
         let main = NSHostingController(rootView: detail)
         main.sizingOptions = []
         let mainItem = NSSplitViewItem(viewController: main)
         mainItem.minimumThickness = 420
+        // No line under the title bar: the main area reads as one surface.
+        sideItem.titlebarSeparatorStyle = .none
+        mainItem.titlebarSeparatorStyle = .none
         controller.addSplitViewItem(sideItem)
         controller.addSplitViewItem(mainItem)
+        sideItem.isCollapsed = !open
         return controller
     }
 
-    func updateNSViewController(_ controller: NSSplitViewController, context: Context) {
-        (controller.splitViewItems.first?.viewController as? NSHostingController<Sidebar>)?.rootView = sidebar
+    func updateNSViewController(_ controller: SidebarSplitController, context: Context) {
+        (controller.splitViewItems.first?.viewController as? NSHostingController<SlidingSidebar<Sidebar>>)?
+            .rootView = SlidingSidebar(slide: controller.slide, content: sidebar)
         (controller.splitViewItems.last?.viewController as? NSHostingController<Detail>)?.rootView = detail
+    }
+}
+
+/// The sidebar's content keeps its open width while it slides, so it moves in
+/// and out with the divider instead of being squeezed (only the visible part
+/// is shown).
+final class SidebarSlide: ObservableObject {
+    @Published var contentWidth: CGFloat?
+}
+
+struct SlidingSidebar<Content: View>: View {
+    @ObservedObject var slide: SidebarSlide
+    let content: Content
+
+    var body: some View {
+        content
+            .frame(width: slide.contentWidth)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .clipped()
+    }
+}
+
+/// Shows and hides the sidebar with its own slide, driven by the display: the
+/// sidebar's width is set for every frame, starting with the next one. AppKit's
+/// collapse animation started a frame late (every slide began with a ~32 ms
+/// gap). Here the
+/// sidebar is only collapsed (without animation) once it is out of sight.
+final class SidebarSplitController: NSSplitViewController {
+    static let defaultWidth: CGFloat = 240
+    static let maximumWidth: CGFloat = 360
+    private static let duration: CFTimeInterval = 0.3
+
+    let slide = SidebarSlide()
+    private(set) var isOpen: Bool
+    private var openWidth = defaultWidth
+    private var link: CADisplayLink?
+    private var from: CGFloat = 0
+    private var to: CGFloat = 0
+    private var start: CFTimeInterval = 0
+
+    init(open: Bool) {
+        isOpen = open
+        super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private var sideItem: NSSplitViewItem? { splitViewItems.first }
+    private var width: CGFloat { splitView.arrangedSubviews.first?.frame.width ?? 0 }
+    var isSliding: Bool { link != nil }
+
+    func toggle() { setOpen(!isOpen) }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        slide.contentWidth = openWidth
+        // A width dragged by hand becomes the open width (and the content's).
+        NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification,
+                                               object: splitView, queue: .main) { [weak self] _ in
+            guard let self, self.isOpen, !self.isSliding, self.width >= Self.defaultWidth else { return }
+            self.openWidth = min(self.width, Self.maximumWidth)
+            if self.slide.contentWidth != self.openWidth { self.slide.contentWidth = self.openWidth }
+        }
+    }
+
+    /// Without animation, so it never shows.
+    private func setCollapsed(_ collapsed: Bool) {
+        guard let sideItem, sideItem.isCollapsed != collapsed else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            sideItem.isCollapsed = collapsed
+        }
+    }
+
+    func setOpen(_ open: Bool) {
+        guard open != isOpen else { return }
+        isOpen = open
+        sideItem?.minimumThickness = 0
+        if open, sideItem?.isCollapsed == true {
+            setCollapsed(false)
+            splitView.setPosition(0, ofDividerAt: 0)
+        }
+        from = width
+        to = open ? openWidth : 0
+        start = CACurrentMediaTime()
+        if link == nil {
+            let link = splitView.displayLink(target: self, selector: #selector(step(_:)))
+            link.add(to: .main, forMode: .common)
+            self.link = link
+        }
+    }
+
+    @objc private func step(_ link: CADisplayLink) {
+        let t = min(1, max(0, (link.targetTimestamp - start) / Self.duration))
+        // Ease out: quick to answer, gentle to settle.
+        let eased = 1 - pow(1 - t, 3)
+        splitView.setPosition(round(from + (to - from) * eased), ofDividerAt: 0)
+        // Lay out now, so this frame shows the new width everywhere.
+        view.window?.contentView?.layoutSubtreeIfNeeded()
+        guard t >= 1 else { return }
+        link.invalidate()
+        self.link = nil
+        if isOpen {
+            sideItem?.minimumThickness = Self.defaultWidth
+        } else {
+            // The sidebar keeps a few points of inset however narrow it is;
+            // collapse it once it is out of sight.
+            setCollapsed(true)
+        }
+    }
+
+    // Nothing to drag while the sidebar is closed or sliding.
+    override func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect,
+                            forDrawnRect drawnRect: NSRect, ofDividerAt dividerIndex: Int) -> NSRect {
+        isOpen && !isSliding ? super.splitView(splitView, effectiveRect: proposedEffectiveRect,
+                                               forDrawnRect: drawnRect, ofDividerAt: dividerIndex) : .zero
+    }
+}
+
+private extension View {
+    @ViewBuilder func hiddenToolbarBackground() -> some View {
+        if #available(macOS 15.0, *) {
+            toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            self
+        }
     }
 }
