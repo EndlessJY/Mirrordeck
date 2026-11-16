@@ -2054,6 +2054,9 @@ struct ContentView: View {
                 .glassPanel()
                 .environmentObject(store)
         }
+        .sheet(isPresented: $updates.promptShown, onDismiss: { UpdateChecker.shared.resetFailure() }) {
+            UpdatePromptView(close: { UpdatePrompt.close() }).glassPanel()
+        }
     }
 }
 

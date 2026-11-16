@@ -77,7 +77,12 @@ jobs:
           prev_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
           notes=""
           if [[ -n "$prev_tag" ]]; then
-            notes=$(git log --no-merges --format='- %s' "${prev_tag}..HEAD" | grep -iv '^co-authored-by:' || true)
+            # Every line of each commit message is one item (a title, then
+            # one change per line), and a title joining several with "；"
+            # is split too.
+            notes=$(git log --no-merges --format='%B' "${prev_tag}..HEAD" \
+              | grep -iv '^co-authored-by:' | perl -CSD -Mutf8 -pe 's/；/\n/g; s/^[-*•] *//; s/^ +//' \
+              | grep -v '^$' | sed 's/^/- /' || true)
           fi
           if [[ -z "$notes" ]]; then
             notes=$(git log -1 --format=%B "$GITHUB_SHA" | grep -iv '^co-authored-by:' || true)

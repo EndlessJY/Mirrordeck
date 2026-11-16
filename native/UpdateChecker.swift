@@ -39,6 +39,8 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var checking = false
     @Published private(set) var status: String?
     @Published private(set) var phase: Phase = .idle
+    /// The update panel is up in the main window.
+    @Published var promptShown = false
 
     private var download: URLSessionDownloadTask?
     private var progress: NSKeyValueObservation?
@@ -125,11 +127,15 @@ final class UpdateChecker: ObservableObject {
     }
 
     /// The "- …" lines of a release's notes.
+    /// One item per change: a line that strings several together with "；"
+    /// (as older releases did) is split into its parts.
     private static func changeLines(_ body: String) -> [String] {
-        body.split(whereSeparator: \.isNewline).compactMap { line in
+        body.split(whereSeparator: \.isNewline).flatMap { line -> [String] in
             let text = line.trimmingCharacters(in: .whitespaces)
-            guard text.hasPrefix("- ") else { return nil }
-            return String(text.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            guard text.hasPrefix("- ") else { return [] }
+            return text.dropFirst(2).split(separator: "；")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
         }
     }
 
@@ -291,51 +297,37 @@ final class UpdateChecker: ObservableObject {
         process.arguments = ["-c", script, "sh", String(ProcessInfo.processInfo.processIdentifier),
                              target.path, app.path, Self.workFolder.path]
         do { try process.run() } catch { return fail("无法启动安装，请稍后再试") }
-        NSApp.terminate(nil)
+        // macOS refuses to quit while a sheet is up (this panel is one), and
+        // the swap waits for the quit: close every sheet first.
+        promptShown = false
+        for window in NSApp.windows {
+            if let sheet = window.attachedSheet { window.endSheet(sheet) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { NSApp.terminate(nil) }
     }
 }
 
 /// The offer of a new version: what changed, and the user's choice to
 /// update now or later.
+/// The offer of a new version, as a panel inside the main window (on the
+/// same frosted glass as the app's other panels).
 enum UpdatePrompt {
-    private static var window: NSWindow?
-
     static func show() {
         NSApp.activate()
-        if let window, window.isVisible {
+        // The main window shows it; it opens with the panel if it was closed.
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true }) {
             window.makeKeyAndOrderFront(nil)
-            return
         }
-        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
-                             styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-        panel.title = "软件更新"
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        panel.isMovableByWindowBackground = true
-        panel.isReleasedWhenClosed = false
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        let host = NSHostingController(rootView: UpdatePromptView(close: { close() }))
-        host.sizingOptions = [.preferredContentSize]
-        panel.contentViewController = host
-        let main = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true && $0.isVisible }
-        if let frame = main?.frame {
-            panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
-                                         y: frame.midY - panel.frame.height / 2 + 40))
-        } else {
-            panel.center()
-        }
-        window = panel
-        panel.makeKeyAndOrderFront(nil)
+        UpdateChecker.shared.promptShown = true
     }
 
     static func close() {
         UpdateChecker.shared.resetFailure()
-        window?.close()
+        UpdateChecker.shared.promptShown = false
     }
 }
 
-private struct UpdatePromptView: View {
+struct UpdatePromptView: View {
     @ObservedObject private var updates = UpdateChecker.shared
     @ObservedObject private var mirror = MirrorStore.shared
     let close: () -> Void
@@ -370,15 +362,15 @@ private struct UpdatePromptView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                 }
-                .frame(height: 210)
+                .frame(minHeight: 80, idealHeight: 210, maxHeight: 210)
                 .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
                 footer(release)
             }
         }
         .padding(.horizontal, 22)
-        .padding(.top, 34)
+        .padding(.top, 22)
         .padding(.bottom, 20)
-        .frame(width: 460)
+        .secondaryPanelSize(width: 460)
     }
 
     @ViewBuilder

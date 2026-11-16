@@ -46,7 +46,10 @@ struct MenuBarContent: View {
             .disabled(mirror.windowCount < 1)
         Divider()
         if let release = updates.available {
-            Button("更新到 \(release.version)…") { UpdatePrompt.show() }
+            Button("更新到 \(release.version)…") {
+                showMainWindow()
+                UpdatePrompt.show()
+            }
             Divider()
         }
         Button("打开幕台") { showMainWindow() }
