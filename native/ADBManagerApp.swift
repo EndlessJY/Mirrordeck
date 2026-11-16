@@ -2651,6 +2651,7 @@ final class SidebarSplitController: NSSplitViewController {
     static let defaultWidth: CGFloat = 240
     static let maximumWidth: CGFloat = 360
     private static let duration: CFTimeInterval = 0.3
+    private static let closeOvershoot: CGFloat = 24
 
     let slide = SidebarSlide()
     private(set) var isOpen: Bool
@@ -2659,6 +2660,9 @@ final class SidebarSplitController: NSSplitViewController {
     private var from: CGFloat = 0
     private var to: CGFloat = 0
     private var start: CFTimeInterval = 0
+    /// The width asked for on the last frame; the sidebar not reaching it
+    /// means it is at its floor.
+    private var requested: CGFloat?
 
     init(open: Bool) {
         isOpen = open
@@ -2703,8 +2707,12 @@ final class SidebarSplitController: NSSplitViewController {
             splitView.setPosition(0, ofDividerAt: 0)
         }
         from = width
-        to = open ? openWidth : 0
+        // Closing aims past zero: the sidebar can't get narrower than a few
+        // points, so it would otherwise stall there and then snap shut. Aimed
+        // past it, it still moves at speed when it reaches that floor.
+        to = open ? openWidth : -Self.closeOvershoot
         start = CACurrentMediaTime()
+        requested = nil
         if link == nil {
             let link = splitView.displayLink(target: self, selector: #selector(step(_:)))
             link.add(to: .main, forMode: .common)
@@ -2716,18 +2724,29 @@ final class SidebarSplitController: NSSplitViewController {
         let t = min(1, max(0, (link.targetTimestamp - start) / Self.duration))
         // Ease out: quick to answer, gentle to settle.
         let eased = 1 - pow(1 - t, 3)
-        splitView.setPosition(round(from + (to - from) * eased), ofDividerAt: 0)
+        let target = round(from + (to - from) * eased)
+        // Closing: once the sidebar would go below what it can show, it shuts.
+        if !isOpen, target <= 0 || requested.map({ width > $0 + 0.5 }) == true {
+            finish()
+            return
+        }
+        splitView.setPosition(target, ofDividerAt: 0)
+        requested = target
         // Lay out now, so this frame shows the new width everywhere.
         view.window?.contentView?.layoutSubtreeIfNeeded()
-        guard t >= 1 else { return }
-        link.invalidate()
-        self.link = nil
+        if t >= 1 { finish() }
+    }
+
+    private func finish() {
+        link?.invalidate()
+        link = nil
         if isOpen {
             sideItem?.minimumThickness = Self.defaultWidth
         } else {
             // The sidebar keeps a few points of inset however narrow it is;
-            // collapse it once it is out of sight.
+            // it collapses the moment it reaches them.
             setCollapsed(true)
+            view.window?.contentView?.layoutSubtreeIfNeeded()
         }
     }
 
