@@ -49,13 +49,35 @@ enum AppAppearanceMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// Bundle-derived notification prefix and support directory so side-by-side
+/// builds with distinct bundle identifiers never overwrite each other's caches
+/// or cross-broadcast mirror notifications.
+enum AppNamespace {
+    static let defaultBundleIdentifier = "uk.agpt.lanadbmanager"
+
+    static var bundlePrefix: String {
+        let id = Bundle.main.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return id.isEmpty ? defaultBundleIdentifier : id
+    }
+
+    static func notificationName(_ suffix: String) -> Notification.Name {
+        Notification.Name("\(bundlePrefix).\(suffix)")
+    }
+
+    static var supportDirectory: URL {
+        let folder = bundlePrefix == defaultBundleIdentifier ? "LAN ADB Manager" : bundlePrefix
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/\(folder)", isDirectory: true)
+    }
+}
+
 /// Reactive theme controller shared by all SwiftUI views, AppKit windows, and
 /// helper `scrcpy` processes (via DistributedNotificationCenter).
 final class ThemeStore: ObservableObject {
     static let shared = ThemeStore()
     static let styleKey = "ui.themeStyle"
     static let appearanceKey = "ui.appearanceMode"
-    static let notificationName = Notification.Name("uk.agpt.lanadbmanager.theme")
+    static var notificationName: Notification.Name { AppNamespace.notificationName("theme") }
 
     @Published var style: AppThemeStyle {
         didSet {
@@ -535,5 +557,37 @@ struct Banner: View {
                     .strokeBorder(tint.opacity(0.22), lineWidth: 0.5)
             }
         }
+    }
+}
+
+extension View {
+    /// Translucent Apple Liquid Glass capsule button on macOS 26+, falling back
+    /// to frosted bordered style on earlier SDKs/OS versions.
+    @ViewBuilder
+    func glassButton() -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+        #else
+        self.buttonStyle(.bordered)
+        #endif
+    }
+
+    /// Prominent tinted Apple Liquid Glass capsule button on macOS 26+, falling
+    /// back to borderedProminent on earlier SDKs/OS versions.
+    @ViewBuilder
+    func glassProminentButton(tint: Color? = Theme.accent) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glassProminent).tint(tint)
+        } else {
+            self.buttonStyle(.borderedProminent).tint(tint)
+        }
+        #else
+        self.buttonStyle(.borderedProminent).tint(tint)
+        #endif
     }
 }

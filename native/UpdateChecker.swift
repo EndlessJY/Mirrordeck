@@ -322,6 +322,9 @@ enum UpdatePrompt {
         if let frame = main?.frame {
             panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2,
                                          y: frame.midY - panel.frame.height / 2 + 40))
+        } else if let screen = MainWindowPlacement.cursorScreen()?.visibleFrame {
+            panel.setFrameOrigin(NSPoint(x: (screen.midX - panel.frame.width / 2).rounded(),
+                                         y: (screen.midY - panel.frame.height / 2 + 40).rounded()))
         } else {
             panel.center()
         }

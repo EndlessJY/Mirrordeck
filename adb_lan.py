@@ -78,6 +78,15 @@ def active_mirror_process() -> bool:
     return any("--no-window" not in line for line in _scrcpy_commands())
 
 
+def active_adb_transfer_process() -> bool:
+    """Avoid restarting the shared ADB server while an APK install or file push runs."""
+    _status, output = run_command(["/bin/ps", "-axww", "-o", "command="], timeout=3)
+    return any(
+        re.search(r"(?:^|/)adb(?:\s+-\S+(?:\s+\S+)?)?\s+(?:install|install-multiple|push)\b", line)
+        for line in output.splitlines()
+    )
+
+
 def mirror_uses_serial(serial: str) -> bool:
     """True when a projection or recording is streaming from this transport."""
     return any(f"--serial={serial}" in line.split() for line in _scrcpy_commands())
@@ -646,8 +655,8 @@ class AdbLan:
         os.replace(temporary, TCPIP_FILE)
 
     def restart_server(self) -> bool:
-        """Restart the local ADB server unless a projection depends on it."""
-        if active_mirror_process():
+        """Restart the local ADB server unless a projection or transfer depends on it."""
+        if active_mirror_process() or active_adb_transfer_process():
             return False
         # A restart reconnects the app's device tracker, which starts another
         # scan; without a cool-down a lasting "no route" would restart it

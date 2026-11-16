@@ -891,8 +891,7 @@ final class DeviceInfoStore: ObservableObject {
     private static let dynamicSections: Set<String> = ["电池", "网络"]
 
     private static var cacheURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/LAN ADB Manager/device_info.json")
+        AppNamespace.supportDirectory.appendingPathComponent("device_info.json")
     }
 
     private init() {
@@ -1118,7 +1117,7 @@ struct DeviceDetail: View {
         } label: {
             Label("选项", systemImage: "slider.horizontal.3")
         }
-        .menuStyle(.button)
+        .glassButton()
         .fixedSize()
         .help("这台设备单独的清晰度、帧率、声音，以及连接后自动投屏")
     }
@@ -1169,9 +1168,9 @@ struct DeviceDetail: View {
                 }
                 infoSection
             }
-            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: 1040, alignment: .leading)
             .padding(Theme.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .top)
             .animation(Theme.quick, value: mirrorState)
             .animation(Theme.quick, value: theme.style)
         }
@@ -1179,8 +1178,10 @@ struct DeviceDetail: View {
             AppPickerView(device: device, options: mirrorOptions)
                 .glassPanel()
         }
-        // A different device starts at the top instead of the old scroll offset.
-        .id(device.identity)
+        .onChange(of: device.identity) { _, _ in
+            pickingApp = false
+            storageCopied = false
+        }
         .task(id: "\(device.identity)|\(device.connected)") { info.load(device) }
     }
 
@@ -1246,7 +1247,7 @@ struct DeviceDetail: View {
             deviceOptionsMenu
             Spacer(minLength: 0)
         }
-        .controlSize(.regular)
+        .controlSize(.large)
     }
 
     /// Secondary tools beside the main mirror action.
@@ -1260,6 +1261,7 @@ struct DeviceDetail: View {
                 } label: {
                     Label("应用", systemImage: "macwindow.on.rectangle")
                 }
+                .glassButton()
                 .help("把手机上的某个应用单独开成一个 Mac 窗口，不影响手机屏幕")
             }
             Button {
@@ -1267,6 +1269,7 @@ struct DeviceDetail: View {
             } label: {
                 Label("日志", systemImage: "list.bullet.rectangle.portrait")
             }
+            .glassButton()
             .help("查看这台设备的实时日志")
         }
         .fixedSize()
@@ -1311,6 +1314,7 @@ struct DeviceDetail: View {
                 Text("正在启动投屏…").font(.callout).foregroundStyle(.secondary)
                     .fixedSize()
                 Button("取消") { stopMirror() }
+                    .glassButton()
             }
             .transition(.opacity)
         case .live:
@@ -1319,7 +1323,7 @@ struct DeviceDetail: View {
             } label: {
                 Label("结束投屏", systemImage: "stop.fill")
             }
-            .tint(theme.isAppleNative ? Theme.recording : nil)
+            .glassProminentButton(tint: theme.isAppleNative ? Theme.recording : Theme.accent)
             .help("关闭这台设备的投屏窗口")
             .transition(.opacity)
         case .idle:
@@ -1331,9 +1335,9 @@ struct DeviceDetail: View {
                 }
             } label: {
                 Label(theme.isAppleNative ? "开始投屏" : "投屏", systemImage: "play.fill")
+                    .padding(.horizontal, 4)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.accent)
+            .glassProminentButton(tint: Theme.accent)
             .disabled(!device.connected)
             .keyboardShortcut(.defaultAction)
             .help(device.isApple ? "在 Mac 上显示这台设备的画面和声音（↩）" :
@@ -1351,9 +1355,19 @@ struct DeviceDetail: View {
     @ViewBuilder
     private var nativeTelemetryStrip: some View {
         if let storage = storageOverview {
-            BalancedColumns(spacing: 16, rowSpacing: 16, twoColumnWidth: 560) {
-                nativeStorageCard(storage)
-                nativeConnectionsCard
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    nativeStorageCard(storage)
+                        .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    nativeConnectionsCard
+                        .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 16) {
+                    nativeStorageCard(storage)
+                    nativeConnectionsCard
+                }
             }
         } else {
             nativeConnectionsCard
@@ -1361,66 +1375,103 @@ struct DeviceDetail: View {
     }
 
     private func nativeStorageCard(_ storage: StorageOverview) -> some View {
-        Button {
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(storage.raw, forType: .string)
-            withAnimation(Theme.quick) { storageCopied = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                withAnimation(Theme.quick) { storageCopied = false }
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack {
-                    Text("存储空间")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if storageCopied {
-                        Label("已复制", systemImage: "checkmark.circle.fill")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Theme.online)
-                    } else {
-                        Text(storage.summaryText)
-                            .font(.system(.caption, design: .monospaced))
+        let storageTint = storage.fraction > 0.9 ? Theme.recording : Theme.accent
+        return VStack(alignment: .leading, spacing: 14) {
+            Button {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(storage.raw, forType: .string)
+                withAnimation(Theme.quick) { storageCopied = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                    withAnimation(Theme.quick) { storageCopied = false }
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "internaldrive")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(storageTint)
+                            .frame(width: 18, alignment: .leading)
+                        Text("存储空间")
+                            .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        if storageCopied {
+                            Label("已复制", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.online)
+                        } else {
+                            Text(storage.summaryText)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    MetricProgressBar(fraction: storage.fraction, tint: storageTint)
+                    HStack {
+                        Text(storage.remainingText)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(Int((storage.fraction * 100).rounded()))% 已使用")
+                            .font(.system(size: 11.5).monospacedDigit())
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.primary.opacity(0.09))
-                        Capsule()
-                            .fill(storage.fraction > 0.9 ? Theme.recording : Theme.accent)
-                            .frame(width: max(6, geo.size.width * storage.fraction))
-                    }
-                }
-                .frame(height: 8)
-                HStack {
-                    Text(storage.remainingText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(Int((storage.fraction * 100).rounded()))% 已使用")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
+                .contentShape(Rectangle())
             }
-            .padding(15)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .fill(Theme.cardFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
-            )
-            .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("\(storage.raw)\n点按复制")
+
+            if let level = info.value("电量", for: device.id) {
+                Divider().opacity(0.65)
+                nativeBatteryRow(level)
+            }
         }
-        .buttonStyle(.plain)
-        .help("\(storage.raw)\n点按复制")
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                .fill(Theme.cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
+    }
+
+    private func nativeBatteryRow(_ level: String) -> some View {
+        let percent = Double(level.filter { $0.isNumber || $0 == "." }) ?? 0
+        let status = info.value("状态", for: device.id) ?? ""
+        let charging = status == "正在充电"
+        let tint: Color = charging ? Theme.online : percent < 20 ? Theme.recording : percent < 40 ? Theme.attention : Theme.online
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
+                Image(systemName: batterySymbol(level))
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(tint)
+                    .frame(width: 18, alignment: .leading)
+                Text("电池电量")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                HStack(spacing: 6) {
+                    if !status.isEmpty {
+                        Text(status)
+                            .foregroundStyle(charging ? Theme.online : .secondary)
+                    }
+                    Text(level)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+                }
+                .font(.system(size: 12).monospacedDigit())
+                .lineLimit(1)
+            }
+            MetricProgressBar(fraction: min(1, max(0, percent / 100)), tint: tint)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("电量 \(level)\(status.isEmpty ? "" : "，\(status)")")
     }
 
     private var nativeConnectionsCard: some View {
@@ -1487,8 +1538,8 @@ struct DeviceDetail: View {
                 }
             }
         }
-        .padding(15)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                 .fill(Theme.cardFill)
@@ -1605,6 +1656,28 @@ struct DeviceDetail: View {
     }
 }
 
+private struct MetricProgressBar: View {
+    let fraction: Double
+    let tint: Color
+
+    var body: some View {
+        Canvas { context, size in
+            let clamped = min(1.0, max(0.0, fraction))
+            let track = Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: size.height / 2)
+            context.fill(track, with: .color(Color.primary.opacity(0.09)))
+            if clamped > 0 {
+                let fillWidth = max(size.height, size.width * clamped)
+                let bar = Path(roundedRect: CGRect(x: 0, y: 0, width: min(size.width, fillWidth), height: size.height),
+                               cornerRadius: size.height / 2)
+                context.fill(bar, with: .color(tint))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 8)
+        .accessibilityHidden(true)
+    }
+}
+
 /// Label on the left, value on the right; long technical strings stay on one
 /// line. Clicking the row copies the value; "已复制" shows in its place.
 struct InfoRow: View {
@@ -1662,6 +1735,10 @@ struct InfoRow: View {
                 // its exit call, and an unbalanced push left the hand everywhere.
                 (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
             }
+        }
+        .onChange(of: item.value) { _, _ in
+            resetTask?.cancel()
+            copied = false
         }
         .animation(Theme.quick, value: copied)
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -2107,31 +2184,30 @@ struct IssueDetail: View {
                 }
                 if issue.endpoint == nil {
                     Button("重新查找设备") { DeviceStore.shared.scanNetwork() }
-                        .buttonStyle(.borderedProminent)
+                        .glassProminentButton(tint: Theme.accent)
                         .controlSize(.large)
-                        .tint(Theme.accent)
                 }
                 if let endpoint = issue.endpoint {
                     HStack(spacing: 10) {
                         if issue.id.hasPrefix("pair:") {
                             Button("输入配对码") { pair(endpoint) }
-                                .buttonStyle(.borderedProminent)
+                                .glassProminentButton(tint: Theme.accent)
                         } else {
                             Button("重新连接") { connect(endpoint) }
-                                .buttonStyle(.borderedProminent)
+                                .glassProminentButton(tint: Theme.accent)
                         }
                         if issue.id.hasPrefix("port:") {
                             Button("忽略此地址") { forget(endpoint) }
+                                .glassButton()
                                 .help("不再自动连接这个地址；设备重新出现时仍会被发现")
                         }
                     }
                     .controlSize(.large)
-                    .tint(Theme.accent)
                 }
             }
-            .frame(maxWidth: 640, alignment: .leading)
+            .frame(maxWidth: 1040, alignment: .leading)
             .padding(Theme.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
     }
 }
@@ -2203,6 +2279,7 @@ struct ActionSheetView: View {
                     store.cancelQueuedAction()
                     dismiss()
                 }
+                .glassButton()
                 .keyboardShortcut(.cancelAction)
                 Button(mode == .connect ? "连接" : "配对") {
                     store.perform(mode.rawValue, endpoint: trimmedEndpoint,
@@ -2211,8 +2288,7 @@ struct ActionSheetView: View {
                         code = ""
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
+                .glassProminentButton(tint: Theme.accent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(store.actionBusy || store.actionQueued || trimmedEndpoint.isEmpty ||
                           (mode == .pair && trimmedCode.count != 6))
@@ -2268,7 +2344,7 @@ struct ContentView: View {
                     Text(error)
                 } actions: {
                     Button("重新扫描") { store.scan(full: false) }
-                        .buttonStyle(.borderedProminent)
+                        .glassProminentButton(tint: Theme.accent)
                 }
             } else if store.report == nil {
                 // The only progress shown before the first result.
@@ -2296,6 +2372,7 @@ struct ContentView: View {
             .ignoresSafeArea()
             .background(TitleBarTrailingButtons().frame(width: 0, height: 0))
             .background(TitleBarLeadingButtons().frame(width: 0, height: 0))
+            .background(MainWindowPlacementProbe().frame(width: 0, height: 0))
             .onReceive(NotificationCenter.default.publisher(for: .toggleCaptureHistory)) { _ in
                 showingHistory.toggle()
             }
@@ -2303,10 +2380,9 @@ struct ContentView: View {
                 showingHistory = true
             }
             .tint(Theme.accent)
-            .frame(minWidth: 720, minHeight: 500)
-            // No toolbar band (and no line under it) across the top of the
-            // main area.
+            .frame(minWidth: 740, minHeight: 500)
             .hiddenToolbarBackground()
+            .navigationTitle("")
         // Inside the main window, on the same glass as the other panels.
         .sheet(isPresented: $showingHistory) {
             CaptureHistoryView().glassPanel()
@@ -2463,6 +2539,7 @@ struct LANADBManagerApp: App {
         WindowGroup(id: "main") {
             ContentView()
         }
+        .defaultSize(width: MainWindowPlacement.idealWidth, height: MainWindowPlacement.defaultHeight)
         .windowStyle(.titleBar)
         // A low title bar with small buttons; the name sits in the sidebar.
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
@@ -2488,6 +2565,7 @@ struct LANADBManagerApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        signal(SIGPIPE, SIG_IGN)
         ThemeStore.shared.applyAppearance()
         UpdateChecker.shared.checkIfDue()
         // iPhones then appear as capture devices by the time one is mirrored.

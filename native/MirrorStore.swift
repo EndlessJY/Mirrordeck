@@ -36,8 +36,8 @@ final class MirrorStore: ObservableObject {
     private var revealAutomatically: Bool {
         UserDefaults.standard.object(forKey: Self.revealInFinderKey) as? Bool ?? false
     }
-    private static let actionName = Notification.Name("uk.agpt.lanadbmanager.mirror.action")
-    private static let stateName = Notification.Name("uk.agpt.lanadbmanager.mirror.state")
+    private static var actionName: Notification.Name { AppNamespace.notificationName("mirror.action") }
+    private static var stateName: Notification.Name { AppNamespace.notificationName("mirror.state") }
 
     @Published private(set) var sessions: [String: MirrorSession] = [:]
     @Published private(set) var errors: [String: String] = [:]
@@ -110,9 +110,8 @@ final class MirrorStore: ObservableObject {
         let keyIdentity = Self.storageIdentity(for: device)
         let identity = SHA256.hash(data: Data(keyIdentity.utf8)).prefix(8)
             .map { String(format: "%02x", Int($0)) }.joined()
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/LAN ADB Manager/Mirrors",
-                                  isDirectory: true)
+        let directory = AppNamespace.supportDirectory
+            .appendingPathComponent("Mirrors", isDirectory: true)
         // The Dock shows the bundle's folder name, so the .app is named after
         // the device and kept in a folder keyed by device and build.
         let bundleName = Self.bundleName(for: device.title)
@@ -175,7 +174,7 @@ final class MirrorStore: ObservableObject {
         let keyIdentity = storageIdentity(for: device)
         let identity = SHA256.hash(data: Data(keyIdentity.utf8)).prefix(8)
             .map { String(format: "%02x", Int($0)) }.joined()
-        return "uk.agpt.lanadbmanager.mirror.\(identity)"
+        return "\(AppNamespace.bundlePrefix).mirror.\(identity)"
     }
 
     private static func bundleName(for title: String) -> String {
@@ -826,6 +825,7 @@ final class MirrorStore: ObservableObject {
             environment["LANADB_SHORTCUT_TIP"] = "1"
         }
         environment["LANADB_GAMUT"] = "srgb"
+        environment["LANADB_NOTIFY_PREFIX"] = AppNamespace.bundlePrefix
         environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
         environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
         environment["SCRCPY_SERVER_PATH"] = server.path

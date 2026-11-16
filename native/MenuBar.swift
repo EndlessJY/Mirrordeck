@@ -211,7 +211,8 @@ enum SettingsWindow {
 
     static func show(_ open: OpenSettingsAction) {
         let main = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true && $0.isVisible }
-        let bounds = main?.frame ?? (NSScreen.main?.visibleFrame.insetBy(dx: 80, dy: 60) ?? .zero)
+        let fallbackScreen = MainWindowPlacement.cursorScreen(fallback: main) ?? NSScreen.main
+        let bounds = main?.frame ?? (fallbackScreen?.visibleFrame.insetBy(dx: 80, dy: 60) ?? .zero)
         layout.width = min(540, max(420, bounds.width - 40))
         layout.maxPageHeight = max(260, bounds.height - chrome - 24)
 
@@ -448,7 +449,9 @@ final class TitleBarLeadingModel: ObservableObject {
 /// slid part of the way and then jumped when opening).
 struct TitleBarLeadingButtons: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { InstallerView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? InstallerView)?.ensureOnTop()
+    }
 
     static let id = NSUserInterfaceItemIdentifier("uk.agpt.lanadbmanager.titlebarLeading")
     /// Left end of the button while the sidebar is closed (after the window
@@ -461,10 +464,17 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
         private var size = NSSize.zero
         private weak var split: NSSplitView?
         private var observers: [NSObjectProtocol] = []
+        private var titlebarEventMonitor: Any?
+        private var dragStart: NSPoint?
         private var ready: AnyCancellable?
         private var reveal: AnyCancellable?
 
-        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+            if let monitor = titlebarEventMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -472,10 +482,11 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
                   let titlebar = window.standardWindowButton(.closeButton)?.superview,
                   !titlebar.subviews.contains(where: { $0.identifier == TitleBarLeadingButtons.id })
             else { return }
-            // No line under the title bar.
+            // Seamless borderless titlebar: no background band and no hairline.
+            window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
             window.toolbar?.showsBaselineSeparator = false
-            let host = NSHostingView(rootView: TitleBarLeadingContent(model: model) { [weak self] in
+            let host = TitleBarLeadingHostView(rootView: TitleBarLeadingContent(model: model) { [weak self] in
                 self?.toggleSidebar()
             })
             host.identifier = TitleBarLeadingButtons.id
@@ -483,6 +494,7 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
             host.frame.size = host.fittingSize
             titlebar.addSubview(host)
             self.host = host
+            installTitlebarMouseMonitor(for: window, titlebar: titlebar)
             observers.append(NotificationCenter.default.addObserver(
                 forName: NSView.frameDidChangeNotification, object: titlebar, queue: .main) { [weak self] _ in
                     self?.place()
@@ -490,6 +502,66 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
             titlebar.postsFrameChangedNotifications = true
             // The split view is in place once this layout pass is done.
             DispatchQueue.main.async { [weak self] in self?.attach() }
+        }
+
+        func ensureOnTop() {
+            guard let host, let titlebar = host.superview, titlebar.subviews.last !== host else { return }
+            titlebar.addSubview(host, positioned: .above, relativeTo: nil)
+        }
+
+        private func installTitlebarMouseMonitor(for window: NSWindow, titlebar: NSView) {
+            if let monitor = titlebarEventMonitor {
+                NSEvent.removeMonitor(monitor)
+                titlebarEventMonitor = nil
+            }
+            titlebarEventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+            ) { [weak self, weak window, weak titlebar] event in
+                guard let self, let window, let titlebar, event.window === window,
+                      !window.styleMask.contains(.fullScreen) else { return event }
+                let loc = event.locationInWindow
+                let isEmptySpot: () -> Bool = {
+                    let tbRect = titlebar.convert(titlebar.bounds, to: nil)
+                    guard tbRect.contains(loc) else { return false }
+                    let hit = window.contentView?.superview?.hitTest(loc)
+                    if hit === titlebar { return true }
+                    if let contentView = window.contentView, let hit, hit.isDescendant(of: contentView) {
+                        return true
+                    }
+                    return false
+                }
+                switch event.type {
+                case .leftMouseDown:
+                    self.dragStart = (event.clickCount == 1 && isEmptySpot()) ? loc : nil
+                    return event
+                case .leftMouseDragged:
+                    if let start = self.dragStart, hypot(loc.x - start.x, loc.y - start.y) >= 3 {
+                        self.dragStart = nil
+                        window.performDrag(with: event)
+                        return nil
+                    }
+                    return event
+                case .leftMouseUp:
+                    self.dragStart = nil
+                    if event.clickCount == 2 && isEmptySpot() {
+                        Self.performTitlebarDoubleClick(for: window)
+                        return nil
+                    }
+                    return event
+                default:
+                    return event
+                }
+            }
+        }
+
+        private static func performTitlebarDoubleClick(for window: NSWindow) {
+            let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize"
+            if action == "None" { return }
+            if action == "Minimize" {
+                window.performMiniaturize(nil)
+            } else {
+                window.zoom(nil)
+            }
         }
 
         private func attach() {
@@ -549,6 +621,68 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
         private func toggleSidebar() {
             (split?.delegate as? SidebarSplitController)?.toggle()
         }
+    }
+}
+
+/// Only the sidebar-toggle `TitleBarGlassGroup` pill (`local.x <= 40` in `bounds`)
+/// captures mouse clicks; `NSView.hitTest(_:)` receives `point` in `superview`
+/// coordinates, so converting to local `bounds` first keeps the button clickable.
+private final class TitleBarLeadingHostView: NSHostingView<TitleBarLeadingContent> {
+    private static let interactivePillWidth: CGFloat = 40
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local), local.x <= Self.interactivePillWidth else { return nil }
+        return super.hitTest(point)
+    }
+}
+
+struct MainWindowPlacementProbe: NSViewRepresentable {
+    func makeNSView(context: Context) -> ProbeView { ProbeView() }
+    func updateNSView(_ nsView: ProbeView, context: Context) {}
+
+    final class ProbeView: NSView {
+        private var didPlace = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard !didPlace, let window, !window.styleMask.contains(.fullScreen),
+                  let screen = MainWindowPlacement.cursorScreen(fallback: window) else { return }
+            didPlace = true
+            window.isRestorable = false
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+            window.setFrame(MainWindowPlacement.initialFrame(for: screen.visibleFrame), display: false)
+        }
+    }
+}
+
+/// Cold-start placement on the display currently containing the cursor:
+/// `1180pt` ideal width and 50% of `visibleFrame.height` (`705pt` floor).
+enum MainWindowPlacement {
+    static let idealWidth: CGFloat = 1180
+    static let defaultHeight: CGFloat = 705
+    static let heightRatio: CGFloat = 0.5
+    static let minFloorHeight: CGFloat = 520
+
+    static func cursorScreen(at mouseLocation: NSPoint = NSEvent.mouseLocation,
+                             screens: [NSScreen] = NSScreen.screens,
+                             fallback window: NSWindow? = nil) -> NSScreen? {
+        if let exact = screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) {
+            return exact
+        }
+        if let near = screens.first(where: { $0.frame.insetBy(dx: -2, dy: -2).contains(mouseLocation) }) {
+            return near
+        }
+        return window?.screen ?? NSScreen.main ?? screens.first
+    }
+
+    static func initialFrame(for available: NSRect) -> NSRect {
+        let width = min(idealWidth, max(760, available.width - 64)).rounded()
+        let maxHeight = max(minFloorHeight, available.height - 74)
+        let height = min(maxHeight, max(defaultHeight, (available.height * heightRatio).rounded()))
+        let originX = min(available.maxX - width, max(available.minX, (available.midX - width / 2).rounded()))
+        let originY = min(available.maxY - height, max(available.minY, (available.midY - height / 2).rounded()))
+        return NSRect(x: originX, y: originY, width: width, height: height)
     }
 }
 

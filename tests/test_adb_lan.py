@@ -614,12 +614,30 @@ class ServerRestartCooldownTests(AdbTestCase):
         calls = []
         with (
             patch.object(adb_lan, "active_mirror_process", return_value=False),
+            patch.object(adb_lan, "active_adb_transfer_process", return_value=False),
             patch.object(first, "command", side_effect=lambda *a, **k: calls.append(a) or (0, "")),
             patch.object(second, "command", side_effect=lambda *a, **k: calls.append(a) or (0, "")),
         ):
             self.assertTrue(first.restart_server())
             self.assertFalse(second.restart_server())
         self.assertEqual(calls.count(("kill-server",)), 1)
+
+    def test_restart_server_skips_while_apk_install_or_push_runs(self):
+        ps_output = (
+            "/Applications/幕台.app/Contents/Resources/Tools/adb -s 0123abcd install /tmp/demo.apk\n"
+        )
+        with patch.object(adb_lan, "run_command", return_value=(0, ps_output)):
+            self.assertTrue(adb_lan.active_adb_transfer_process())
+
+        manager = AdbLan()
+        calls = []
+        with (
+            patch.object(adb_lan, "active_mirror_process", return_value=False),
+            patch.object(adb_lan, "active_adb_transfer_process", return_value=True),
+            patch.object(manager, "command", side_effect=lambda *a, **k: calls.append(a) or (0, "")),
+        ):
+            self.assertFalse(manager.restart_server())
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

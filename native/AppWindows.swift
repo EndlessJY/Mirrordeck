@@ -114,6 +114,7 @@ final class AppWindowStore: ObservableObject {
         environment["LANADB_GAMUT"] = "srgb"
         environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
         environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
+        environment["LANADB_NOTIFY_PREFIX"] = AppNamespace.bundlePrefix
         environment["SCRCPY_SERVER_PATH"] = tools.appendingPathComponent("scrcpy-server").path
         environment["SCRCPY_ICON_DIR"] = tools.path
         environment["PATH"] = "\(tools.path):/usr/bin:/bin:/usr/sbin:/sbin"
@@ -455,7 +456,7 @@ final class AppWindowStore: ObservableObject {
                 if root != lastRoot {
                     lastRoot = root
                     DistributedNotificationCenter.default().postNotificationName(
-                        Notification.Name("uk.agpt.lanadbmanager.mirror.state"), object: nil,
+                        AppNamespace.notificationName("mirror.state"), object: nil,
                         userInfo: ["token": token, "kind": "appRoot", "root": root,
                                    "success": true, "message": ""],
                         deliverImmediately: true)

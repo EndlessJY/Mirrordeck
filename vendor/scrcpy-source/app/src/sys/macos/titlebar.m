@@ -165,6 +165,14 @@ enum {
 }
 @end
 
+static NSString *
+lanadb_notification_name(NSString *suffix) {
+    const char *prefix = getenv("LANADB_NOTIFY_PREFIX");
+    NSString *base = (prefix && prefix[0]) ? [NSString stringWithUTF8String:prefix]
+                                           : @"uk.agpt.lanadbmanager";
+    return [NSString stringWithFormat:@"%@.%@", base, suffix];
+}
+
 // Short message over the top of the device picture (instead of a popover).
 @interface LANADBToastView : LANADBFlashView
 - (instancetype)initWithMessage:(NSString *)message symbol:(NSString *)symbol;
@@ -538,10 +546,10 @@ enum {
                                                  name:NSWindowDidBecomeKeyNotification object:window];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(mirrorStateChanged:)
-        name:@"uk.agpt.lanadbmanager.mirror.state" object:nil];
+        name:lanadb_notification_name(@"mirror.state") object:nil];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(themeChanged:)
-        name:@"uk.agpt.lanadbmanager.theme" object:nil];
+        name:lanadb_notification_name(@"theme") object:nil];
     if (_appWindow) {
         // Home and Recents would open the launcher on the virtual display, so
         // they are left out; Back moves to the front of the button row. The
@@ -1566,7 +1574,7 @@ enum {
     if (path.length) { info[@"path"] = path; }
     if (extra) { [info addEntriesFromDictionary:extra]; }
     [[NSDistributedNotificationCenter defaultCenter]
-        postNotificationName:@"uk.agpt.lanadbmanager.mirror.action"
+        postNotificationName:lanadb_notification_name(@"mirror.action")
                     object:nil
                   userInfo:info
         deliverImmediately:YES];
