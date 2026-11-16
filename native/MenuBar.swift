@@ -46,7 +46,7 @@ struct MenuBarContent: View {
             .disabled(mirror.windowCount < 1)
         Divider()
         if let release = updates.available {
-            Button("下载新版本 \(release.version)…") { NSWorkspace.shared.open(release.page) }
+            Button("更新到 \(release.version)…") { UpdatePrompt.show() }
             Divider()
         }
         Button("打开幕台") { showMainWindow() }

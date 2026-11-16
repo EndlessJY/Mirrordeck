@@ -1749,10 +1749,10 @@ struct MirrorSettingsView: View {
                     LabeledContent("当前版本", value: UpdateChecker.isLocalBuild ?
                                    "\(UpdateChecker.currentVersion)（本机构建）" : UpdateChecker.currentVersion)
                     Toggle("自动检查更新", isOn: $autoUpdateCheck)
-                        .help("每天最多一次，读取 GitHub 上的最新版本信息；不会自动下载或安装")
+                        .help("每天最多一次，读取 GitHub 上的最新版本信息；有新版本时显示更新内容，由你决定是否更新")
                     HStack {
                         if let release = updates.available {
-                            Button("下载新版本 \(release.version)") { NSWorkspace.shared.open(release.page) }
+                            Button("更新到 \(release.version)…") { UpdatePrompt.show() }
                                 .buttonStyle(.borderedProminent)
                                 .tint(Theme.accent)
                         }
@@ -2429,13 +2429,13 @@ struct SidebarColumn: View {
             }
             if let release = updates.available {
                 Button {
-                    NSWorkspace.shared.open(release.page)
+                    UpdatePrompt.show()
                 } label: {
-                    Label("新版本 \(release.version) 可下载", systemImage: "arrow.down.circle.fill")
+                    Label("新版本 \(release.version) 可更新", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Theme.accent)
-                .help("打开 GitHub 下载新版本")
+                .help("查看更新内容并更新")
             }
         }
         .font(.caption)

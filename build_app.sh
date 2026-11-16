@@ -48,7 +48,7 @@ build/venv/bin/pyinstaller --noconfirm --onedir --console --target-arch arm64 \
   --collect-submodules pymobiledevice3 --collect-data pymobiledevice3 worker.py
 
 if [[ -d "$app" ]]; then
-  /bin/mv "$app" "build/previous-package-$(/bin/date +%Y%m%d%H%M%S).app"
+  /bin/rm -rf "$app"
 fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # libwebp (animated WebP export) is linked statically from Homebrew's webp.
