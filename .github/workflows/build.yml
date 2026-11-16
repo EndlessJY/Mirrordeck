@@ -25,6 +25,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Controls only get the current system look (Liquid Glass) when the app
+      # is built with the macOS 26 SDK; the runner's default Xcode is older.
+      - name: 选用 Xcode 26
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)
+          [[ -n "$xcode" ]] || { echo "构建机上没有 Xcode 26" >&2; ls -d /Applications/Xcode*.app; exit 1; }
+          sudo xcode-select -s "$xcode"
+          xcrun --show-sdk-version
+
       - name: 安装构建依赖
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
