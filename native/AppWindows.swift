@@ -106,19 +106,19 @@ final class AppWindowStore: ObservableObject {
         var environment = ProcessInfo.processInfo.environment
         let adb = tools.appendingPathComponent("adb").path
         environment["ADB"] = adb
-        environment["LANADB_ADB"] = adb
-        environment["LANADB_SERIAL"] = serial
-        environment["LANADB_APP_WINDOW"] = "1"
-        environment["LANADB_ARROW_SWIPE"] = MirrorStore.arrowSwipe ? "1" : "0"
-        environment["LANADB_RECORDING"] = "0"
-        environment["LANADB_GAMUT"] = "srgb"
-        environment["LANADB_THEME"] = "classic"
-        environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
+        environment["MIRRORDECK_ADB"] = adb
+        environment["MIRRORDECK_SERIAL"] = serial
+        environment["MIRRORDECK_APP_WINDOW"] = "1"
+        environment["MIRRORDECK_ARROW_SWIPE"] = MirrorStore.arrowSwipe ? "1" : "0"
+        environment["MIRRORDECK_RECORDING"] = "0"
+        environment["MIRRORDECK_GAMUT"] = "srgb"
+        environment["MIRRORDECK_THEME"] = "classic"
+        environment["MIRRORDECK_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
         environment["SCRCPY_SERVER_PATH"] = tools.appendingPathComponent("scrcpy-server").path
         environment["SCRCPY_ICON_DIR"] = tools.path
         environment["PATH"] = "\(tools.path):/usr/bin:/bin:/usr/sbin:/sbin"
         for key in ["ANDROID_SERIAL", "ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS",
-                    "ANDROID_ADB_SERVER_PORT", "LANADB_SESSION_TOKEN"] {
+                    "ANDROID_ADB_SERVER_PORT", "MIRRORDECK_SESSION_TOKEN"] {
             environment.removeValue(forKey: key)
         }
         return environment
@@ -173,7 +173,7 @@ final class AppWindowStore: ObservableObject {
         let name = Data(id.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-")
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/LAN ADB Manager/AppCache", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/Mirrordeck/AppCache", isDirectory: true)
             .appendingPathComponent(name + ".plist")
     }
 
@@ -286,9 +286,9 @@ final class AppWindowStore: ObservableObject {
     /// placed in /data/local/tmp for the moment it runs and deleted after.
     private static func readIcons(serial: String, packages: [String], adb: URL) -> [String: Data] {
         guard !packages.isEmpty,
-              let dex = Bundle.main.resourceURL?.appendingPathComponent("lanadb-icons.dex"),
+              let dex = Bundle.main.resourceURL?.appendingPathComponent("mirrordeck-icons.dex"),
               FileManager.default.fileExists(atPath: dex.path) else { return [:] }
-        let remote = "/data/local/tmp/lanadb-icons-\(UUID().uuidString.prefix(8)).dex"
+        let remote = "/data/local/tmp/mirrordeck-icons-\(UUID().uuidString.prefix(8)).dex"
         _ = run(adb, ["-s", serial, "push", dex.path, remote], timeout: 15)
         let output = run(adb, ["-s", serial, "shell",
                                "CLASSPATH=\(remote) app_process / IconDump 96 " +
@@ -427,22 +427,22 @@ final class AppWindowStore: ObservableObject {
         process.arguments = arguments
         let token = UUID().uuidString
         var environment = environment(serial: transport.endpoint, tools: tools)
-        environment["LANADB_SESSION_TOKEN"] = token
-        environment["LANADB_AUDIO_ENABLED"] = audio ? "1" : "0"
+        environment["MIRRORDECK_SESSION_TOKEN"] = token
+        environment["MIRRORDECK_AUDIO_ENABLED"] = audio ? "1" : "0"
         // Its sound is taken before the phone's volume applies: the window's
         // volume buttons and keys then set this window's own volume.
-        environment["LANADB_APP_OWN_AUDIO"] = ownAudio ? "1" : "0"
-        environment["LANADB_APP_LABEL"] = app.label
+        environment["MIRRORDECK_APP_OWN_AUDIO"] = ownAudio ? "1" : "0"
+        environment["MIRRORDECK_APP_LABEL"] = app.label
         if let data = iconData[id]?[app.package] {
             let icon = FileManager.default.temporaryDirectory
-                .appendingPathComponent("lanadb-icon-\(UUID().uuidString).png")
-            if (try? data.write(to: icon)) != nil { environment["LANADB_APP_ICON"] = icon.path }
+                .appendingPathComponent("mirrordeck-icon-\(UUID().uuidString).png")
+            if (try? data.write(to: icon)) != nil { environment["MIRRORDECK_APP_ICON"] = icon.path }
         }
         process.environment = environment
         // A log file, not a pipe: a pipe nobody drains fast enough would fill
         // and block the window. It is read for the error if the window fails.
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lan-adb-scrcpy-\(UUID().uuidString).log")
+            .appendingPathComponent("mirrordeck-scrcpy-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: logURL.path, contents: nil),
               let logHandle = try? FileHandle(forWritingTo: logURL) else {
             open[id]?.remove(app.package)
@@ -455,7 +455,7 @@ final class AppWindowStore: ObservableObject {
             logHandle.closeFile()
             let text = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
             try? FileManager.default.removeItem(at: logURL)
-            if let icon = environment["LANADB_APP_ICON"] {
+            if let icon = environment["MIRRORDECK_APP_ICON"] {
                 try? FileManager.default.removeItem(atPath: icon)
             }
             DispatchQueue.main.async {
@@ -494,7 +494,7 @@ final class AppWindowStore: ObservableObject {
         } catch {
             logHandle.closeFile()
             try? FileManager.default.removeItem(at: logURL)
-            if let icon = environment["LANADB_APP_ICON"] {
+            if let icon = environment["MIRRORDECK_APP_ICON"] {
                 try? FileManager.default.removeItem(atPath: icon)
             }
             open[id]?.remove(app.package)
@@ -558,7 +558,7 @@ final class AppWindowStore: ObservableObject {
                 if root != lastRoot {
                     lastRoot = root
                     DistributedNotificationCenter.default().postNotificationName(
-                        Notification.Name("uk.agpt.lanadbmanager.mirror.state"), object: nil,
+                        Notification.Name("uk.agpt.mirrordeck.mirror.state"), object: nil,
                         userInfo: ["token": token, "kind": "appRoot", "root": root,
                                    "success": true, "message": ""],
                         deliverImmediately: true)

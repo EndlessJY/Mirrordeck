@@ -6,7 +6,7 @@ final class AppleDeviceMonitor {
     var onChange: (() -> Void)?
     private var socketHandle: Int32 = -1
     private var stopped = false
-    private let queue = DispatchQueue(label: "uk.agpt.lanadbmanager.usbmuxd")
+    private let queue = DispatchQueue(label: "uk.agpt.mirrordeck.usbmuxd")
 
     func start() {
         queue.async { [weak self] in self?.listen() }

@@ -112,7 +112,7 @@ enum PhoneSettings {
 enum PhoneQuiet {
     private static var counts: [String: Int] = [:]
     private static var turnedOn = Set<String>()
-    private static let queue = DispatchQueue(label: "uk.agpt.lanadbmanager.quiet")
+    private static let queue = DispatchQueue(label: "uk.agpt.mirrordeck.quiet")
 
     static func begin(serial: String) {
         guard PhoneSettings.quietRecording else { return }
@@ -178,4 +178,45 @@ extension IssueItem {
         ("三星", "设置 › 关于手机 › 软件信息 › 连续点按“编译编号”"),
         ("其他 Android", "设置 › 关于手机 › 连续点按“版本号”"),
     ]
+}
+
+/// Where the app keeps its data: ~/Library/Application Support/Mirrordeck.
+enum AppSupport {
+    static let folder = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Mirrordeck", isDirectory: true)
+
+    /// Builds before the rename kept their settings under another identifier
+    /// and their data in another folder: on the first launch both move here,
+    /// and the old ones are removed, so no old name is left behind.
+    static func migrateFromOldName() {
+        let oldDomain = "uk.agpt.lanadbmanager"
+        let defaults = UserDefaults.standard
+        if let old = defaults.persistentDomain(forName: oldDomain), !old.isEmpty {
+            for (key, value) in old where defaults.object(forKey: key) == nil {
+                defaults.set(value, forKey: key)
+            }
+            defaults.removePersistentDomain(forName: oldDomain)
+            // The preferences daemon writes the emptied domain back as a file
+            // a moment later; the file goes once that has happened.
+            let plist = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Preferences/\(oldDomain).plist")
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+                try? FileManager.default.removeItem(at: plist)
+            }
+        }
+
+        let fm = FileManager.default
+        let oldFolder = folder.deletingLastPathComponent().appendingPathComponent("LAN ADB Manager", isDirectory: true)
+        guard fm.fileExists(atPath: oldFolder.path) else { return }
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let items = (try? fm.contentsOfDirectory(atPath: oldFolder.path)) ?? []
+        // Mirror copies are made again for this build; everything else moves.
+        for item in items where item != "Mirrors" {
+            let target = folder.appendingPathComponent(item)
+            if !fm.fileExists(atPath: target.path) {
+                try? fm.moveItem(at: oldFolder.appendingPathComponent(item), to: target)
+            }
+        }
+        try? fm.removeItem(at: oldFolder)
+    }
 }

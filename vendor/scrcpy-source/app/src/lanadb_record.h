@@ -1,5 +1,5 @@
-#ifndef LANADB_RECORD_H
-#define LANADB_RECORD_H
+#ifndef MIRRORDECK_RECORD_H
+#define MIRRORDECK_RECORD_H
 
 // LANADB: recording started and stopped while the window is open. Single-app
 // windows show a virtual display that no other process may capture, so they

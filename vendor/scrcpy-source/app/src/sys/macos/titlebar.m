@@ -15,7 +15,7 @@ bool sc_lanadb_content_size(int *width, int *height);
 bool lanadb_record_start(const char *filename, int format, bool audio);
 bool lanadb_record_stop(void);
 void sc_lanadb_flush_pending(void);
-enum { LANADB_FORMAT_MP4 = 1, LANADB_FORMAT_MKV = 2 };
+enum { MIRRORDECK_FORMAT_MP4 = 1, MIRRORDECK_FORMAT_MKV = 2 };
 bool sc_lanadb_snapshot(uint8_t **rgba, int *width, int *height);
 void *sc_lanadb_snapshot_buffer(void);
 bool sc_audio_player_is_muted(void);
@@ -481,24 +481,24 @@ enum {
     _targetWindow = window;
     _serial = [serial copy];
     _adbPath = [adbPath copy];
-    const char *token = getenv("LANADB_SESSION_TOKEN");
+    const char *token = getenv("MIRRORDECK_SESSION_TOKEN");
     _sessionToken = token ? [NSString stringWithUTF8String:token] : @"";
-    _recording = getenv("LANADB_RECORDING") && !strcmp(getenv("LANADB_RECORDING"), "1");
+    _recording = getenv("MIRRORDECK_RECORDING") && !strcmp(getenv("MIRRORDECK_RECORDING"), "1");
     _pinned = window.level > NSNormalWindowLevel;
     _screenAwake = YES;
     _musicKnown = YES;
-    _audioAvailable = !getenv("LANADB_AUDIO_ENABLED") ||
-        strcmp(getenv("LANADB_AUDIO_ENABLED"), "0") != 0;
+    _audioAvailable = !getenv("MIRRORDECK_AUDIO_ENABLED") ||
+        strcmp(getenv("MIRRORDECK_AUDIO_ENABLED"), "0") != 0;
     _musicMuted = sc_audio_player_is_muted();
-    _appWindow = getenv("LANADB_APP_WINDOW") && !strcmp(getenv("LANADB_APP_WINDOW"), "1");
-    const char *themeEnv = getenv("LANADB_THEME");
+    _appWindow = getenv("MIRRORDECK_APP_WINDOW") && !strcmp(getenv("MIRRORDECK_APP_WINDOW"), "1");
+    const char *themeEnv = getenv("MIRRORDECK_THEME");
     _nativeTheme = themeEnv && !strcmp(themeEnv, "native");
-    const char *appearanceEnv = getenv("LANADB_APPEARANCE");
+    const char *appearanceEnv = getenv("MIRRORDECK_APPEARANCE");
     if (appearanceEnv && appearanceEnv[0]) {
         [self applyAppearanceMode:[NSString stringWithUTF8String:appearanceEnv]];
     }
-    _actionQueue = dispatch_queue_create("lanadb.scrcpy.titlebar.actions", DISPATCH_QUEUE_SERIAL);
-    _statusQueue = dispatch_queue_create("lanadb.scrcpy.titlebar.status", DISPATCH_QUEUE_SERIAL);
+    _actionQueue = dispatch_queue_create("mirrordeck.scrcpy.titlebar.actions", DISPATCH_QUEUE_SERIAL);
+    _statusQueue = dispatch_queue_create("mirrordeck.scrcpy.titlebar.status", DISPATCH_QUEUE_SERIAL);
     self.layoutAttribute = NSLayoutAttributeBottom;
 
     NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 420, 26)];
@@ -542,10 +542,10 @@ enum {
                                                  name:NSWindowDidBecomeKeyNotification object:window];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(mirrorStateChanged:)
-        name:@"uk.agpt.lanadbmanager.mirror.state" object:nil];
+        name:@"uk.agpt.mirrordeck.mirror.state" object:nil];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(themeChanged:)
-        name:@"uk.agpt.lanadbmanager.theme" object:nil];
+        name:@"uk.agpt.mirrordeck.theme" object:nil];
     if (_appWindow) {
         // Home and Recents would open the launcher on the virtual display, so
         // they are left out; Back moves to the front of the button row. The
@@ -648,7 +648,7 @@ enum {
 // space typed into the text field. While the Mac input method is composing
 // (pinyin candidates), Space stays with it. Off with the arrow-key setting.
 - (BOOL)handleSpace:(NSEvent *)event {
-    const char *enabled = getenv("LANADB_ARROW_SWIPE");
+    const char *enabled = getenv("MIRRORDECK_ARROW_SWIPE");
     if (!enabled || strcmp(enabled, "1") || event.keyCode != 49) {
         return NO;
     }
@@ -789,8 +789,8 @@ enum {
 - (void)showLaunchOverlay {
     NSView *content = self.targetWindow.contentView;
     if (!content || self.launchView) { return; }
-    const char *label = getenv("LANADB_APP_LABEL");
-    const char *iconPath = getenv("LANADB_APP_ICON");
+    const char *label = getenv("MIRRORDECK_APP_LABEL");
+    const char *iconPath = getenv("MIRRORDECK_APP_ICON");
     NSImage *icon = iconPath && iconPath[0] ?
         [[NSImage alloc] initWithContentsOfFile:[NSString stringWithUTF8String:iconPath]] : nil;
     LANADBLaunchView *view = [[LANADBLaunchView alloc]
@@ -1112,7 +1112,7 @@ enum {
             if (active && !converting && self.appWindow && [info[@"recordTo"] length]) {
                 NSString *target = info[@"recordTo"];
                 int format = [target.pathExtension.lowercaseString
-                    isEqualToString:@"mkv"] ? LANADB_FORMAT_MKV : LANADB_FORMAT_MP4;
+                    isEqualToString:@"mkv"] ? MIRRORDECK_FORMAT_MKV : MIRRORDECK_FORMAT_MP4;
                 BOOL recordAudio = [info[@"recordAudio"] boolValue];
                 if (!lanadb_record_start(target.fileSystemRepresentation, format, recordAudio)) {
                     [self postAction:kind path:nil extra:@{@"finished": @"0", @"failed": @"1"}];
@@ -1273,7 +1273,7 @@ enum {
 // LANADB: ⌘/ shows the keyboard shortcuts over the picture.
 - (NSArray<NSArray<NSString *> *> *)shortcutRows {
     NSMutableArray *rows = [NSMutableArray array];
-    const char *swipe = getenv("LANADB_ARROW_SWIPE");
+    const char *swipe = getenv("MIRRORDECK_ARROW_SWIPE");
     if (swipe && !strcmp(swipe, "1")) {
         [rows addObject:@[@"↑ / ↓", @"上一条 / 下一条（上下滑动）"]];
         [rows addObject:@[@"空格", @"暂停 / 继续（点按屏幕中央）"]];
@@ -1586,7 +1586,7 @@ enum {
     if (path.length) { info[@"path"] = path; }
     if (extra) { [info addEntriesFromDictionary:extra]; }
     [[NSDistributedNotificationCenter defaultCenter]
-        postNotificationName:@"uk.agpt.lanadbmanager.mirror.action"
+        postNotificationName:@"uk.agpt.mirrordeck.mirror.action"
                     object:nil
                   userInfo:info
         deliverImmediately:YES];
@@ -1731,7 +1731,7 @@ enum {
         CVPixelBufferRef hardware = (CVPixelBufferRef) sc_lanadb_snapshot_buffer();
         if (hardware) {
             NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"lanadb-snapshot-%@.png", NSUUID.UUID.UUIDString]];
+                [NSString stringWithFormat:@"mirrordeck-snapshot-%@.png", NSUUID.UUID.UUIDString]];
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 CIImage *image = [CIImage imageWithCVPixelBuffer:hardware];
                 CIContext *context = [CIContext contextWithOptions:nil];
@@ -1750,7 +1750,7 @@ enum {
             });
         } else if (sc_lanadb_snapshot(&rgba, &width, &height)) {
             NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"lanadb-snapshot-%@.png", NSUUID.UUID.UUIDString]];
+                [NSString stringWithFormat:@"mirrordeck-snapshot-%@.png", NSUUID.UUID.UUIDString]];
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
                     initWithBitmapDataPlanes:NULL pixelsWide:width pixelsHigh:height
@@ -1867,7 +1867,7 @@ enum {
 // the device's own display gamut so colours match the phone.
 static void
 lanadb_apply_gamut(NSWindow *window) {
-    const char *gamut = getenv("LANADB_GAMUT");
+    const char *gamut = getenv("MIRRORDECK_GAMUT");
     CFStringRef name = gamut && !strcmp(gamut, "p3") ? kCGColorSpaceDisplayP3 : kCGColorSpaceSRGB;
     CGColorSpaceRef space = CGColorSpaceCreateWithName(name);
     NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:window.contentView];
@@ -1970,8 +1970,8 @@ sc_lanadb_file_event(int phase, bool apk, const char *file, bool ok) {
 
 void
 sc_macos_titlebar_install(SDL_Window *window) {
-    const char *serial = getenv("LANADB_SERIAL");
-    const char *adb = getenv("LANADB_ADB");
+    const char *serial = getenv("MIRRORDECK_SERIAL");
+    const char *adb = getenv("MIRRORDECK_ADB");
     if (!serial || !serial[0] || !adb || !adb[0]) {
         return;
     }
@@ -2004,7 +2004,7 @@ sc_macos_titlebar_install(SDL_Window *window) {
         lanadb_apply_gamut(nativeWindow);
         [controller fitToPicture:YES];
         // The first mirrors after installing point at the shortcut sheet once.
-        const char *tip = getenv("LANADB_SHORTCUT_TIP");
+        const char *tip = getenv("MIRRORDECK_SHORTCUT_TIP");
         if (tip && !strcmp(tip, "1")) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{

@@ -75,7 +75,7 @@ enum WebPConverter {
 
         // Written beside the system temp files and moved into place when complete.
         let partial = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).webp")
+            .appendingPathComponent("mirrordeck-gif-\(UUID().uuidString).webp")
         defer { try? FileManager.default.removeItem(at: partial) }
         try Data(bytes: bytes, count: data.size).write(to: partial)
         try? FileManager.default.removeItem(at: destination)

@@ -71,7 +71,7 @@ webp=/opt/homebrew/opt/webp
   -import-objc-header native/WebPBridge.h -I "$webp/include" \
   -Xlinker "$webp/lib/libwebpmux.a" -Xlinker "$webp/lib/libwebp.a" \
   -Xlinker "$webp/lib/libsharpyuv.a" \
-  -o "$app/Contents/MacOS/LANADBManager" \
+  -o "$app/Contents/MacOS/Mirrordeck" \
   native/ADBManagerApp.swift native/Theme.swift native/MirrorStore.swift native/DeviceActions.swift \
   native/GIFConverter.swift native/WebPConverter.swift \
   native/AppWindows.swift native/AppPicker.swift native/DeviceLogs.swift \
@@ -79,7 +79,7 @@ webp=/opt/homebrew/opt/webp
   native/DevicePrefs.swift native/CaptureHistory.swift native/UpdateChecker.swift native/MenuBar.swift native/LiveStats.swift
 /bin/cp native/Info.plist "$app/Contents/Info.plist"
 # Reads app icons on the device for the app picker (run, then deleted there).
-/bin/cp android/icons/lanadb-icons.dex "$app/Contents/Resources/lanadb-icons.dex"
+/bin/cp android/icons/mirrordeck-icons.dex "$app/Contents/Resources/mirrordeck-icons.dex"
 # CI passes its run number: every build is its own version, "4.0.<run>"
 # (major.minor from native/Info.plist), shown in About and on its release.
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
@@ -94,7 +94,7 @@ mkdir -p "$app/Contents/Resources/Tools"
 /usr/bin/tar -xf "$archive" -C "$app/Contents/Resources/Tools" --strip-components=1
 /bin/rm "$app/Contents/Resources/Tools/scrcpy"
 /bin/cp build/scrcpy-server/scrcpy-server "$app/Contents/Resources/Tools/scrcpy-server"
-mirror="$app/Contents/Helpers/LANADBMirror.app"
+mirror="$app/Contents/Helpers/MirrordeckMirror.app"
 /bin/mkdir -p "$mirror/Contents/MacOS"
 /bin/cp native/MirrorInfo.plist "$mirror/Contents/Info.plist"
 if [[ -n "${BUILD_NUMBER:-}" ]]; then

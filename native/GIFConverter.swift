@@ -42,7 +42,7 @@ enum GIFConverter {
         // Written beside the system temp files and moved into place when
         // complete, so the save folder never shows a half-written GIF.
         let partial = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).gif")
+            .appendingPathComponent("mirrordeck-gif-\(UUID().uuidString).gif")
         guard FileManager.default.createFile(atPath: partial.path, contents: nil),
               let file = try? FileHandle(forWritingTo: partial) else { throw Failure.output }
         defer {

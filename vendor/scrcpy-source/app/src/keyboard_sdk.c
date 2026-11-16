@@ -274,13 +274,13 @@ convert_input_key(const struct sc_key_event *event, struct sc_control_msg *msg,
 // the clipboard asynchronously when it handles the paste, so two pastes sent
 // back to back race: the second text can replace the first before it is read.
 // Text arriving within a short gap after a paste is gathered and sent as one.
-#define LANADB_PASTE_GAP_MS 120
-#define LANADB_PENDING_MAX 4096
+#define MIRRORDECK_PASTE_GAP_MS 120
+#define MIRRORDECK_PENDING_MAX 4096
 
 static sc_mutex lanadb_paste_mutex;
 static bool lanadb_paste_ready;
 static struct sc_controller *lanadb_paste_controller;
-static char lanadb_pending[LANADB_PENDING_MAX];
+static char lanadb_pending[MIRRORDECK_PENDING_MAX];
 static size_t lanadb_pending_len;
 static sc_tick lanadb_last_paste;
 static SDL_TimerID lanadb_paste_timer;
@@ -288,10 +288,10 @@ static SDL_TimerID lanadb_paste_timer;
 // Texts pasted for typing; their echo from the device clipboard must not
 // overwrite the Mac clipboard. Consumed once or expired after 5 seconds so
 // copying the same text on the phone later still reaches the Mac.
-#define LANADB_RECENT_COUNT 16
-#define LANADB_RECENT_TTL SC_TICK_FROM_SEC(5)
-static char *lanadb_recent[LANADB_RECENT_COUNT];
-static sc_tick lanadb_recent_at[LANADB_RECENT_COUNT];
+#define MIRRORDECK_RECENT_COUNT 16
+#define MIRRORDECK_RECENT_TTL SC_TICK_FROM_SEC(5)
+static char *lanadb_recent[MIRRORDECK_RECENT_COUNT];
+static sc_tick lanadb_recent_at[MIRRORDECK_RECENT_COUNT];
 static size_t lanadb_recent_next;
 
 static void
@@ -299,7 +299,7 @@ lanadb_remember_locked(const char *text) {
     free(lanadb_recent[lanadb_recent_next]);
     lanadb_recent[lanadb_recent_next] = strdup(text);
     lanadb_recent_at[lanadb_recent_next] = sc_tick_now();
-    lanadb_recent_next = (lanadb_recent_next + 1) % LANADB_RECENT_COUNT;
+    lanadb_recent_next = (lanadb_recent_next + 1) % MIRRORDECK_RECENT_COUNT;
 }
 
 bool
@@ -310,11 +310,11 @@ sc_lanadb_is_typing_paste(const char *text) {
     bool found = false;
     sc_tick now = sc_tick_now();
     sc_mutex_lock(&lanadb_paste_mutex);
-    for (size_t i = 0; i < LANADB_RECENT_COUNT; ++i) {
+    for (size_t i = 0; i < MIRRORDECK_RECENT_COUNT; ++i) {
         if (!lanadb_recent[i]) {
             continue;
         }
-        if (now - lanadb_recent_at[i] > LANADB_RECENT_TTL) {
+        if (now - lanadb_recent_at[i] > MIRRORDECK_RECENT_TTL) {
             free(lanadb_recent[i]);
             lanadb_recent[i] = NULL;
             continue;
@@ -383,15 +383,15 @@ lanadb_paste_text(struct sc_keyboard_sdk *kb, const char *text) {
     sc_mutex_lock(&lanadb_paste_mutex);
     lanadb_paste_controller = kb->controller;
     sc_tick elapsed = sc_tick_now() - lanadb_last_paste;
-    sc_tick gap = SC_TICK_FROM_MS(LANADB_PASTE_GAP_MS);
+    sc_tick gap = SC_TICK_FROM_MS(MIRRORDECK_PASTE_GAP_MS);
     size_t len = strlen(text);
     if (!lanadb_pending_len && !lanadb_paste_timer && elapsed >= gap) {
         lanadb_send_paste_locked(text);
     } else {
-        if (lanadb_pending_len + len >= LANADB_PENDING_MAX) {
+        if (lanadb_pending_len + len >= MIRRORDECK_PENDING_MAX) {
             lanadb_flush_locked();
         }
-        if (len >= LANADB_PENDING_MAX) {
+        if (len >= MIRRORDECK_PENDING_MAX) {
             // LANADB: longer than the whole buffer: send it on its own,
             // after what was waiting, instead of writing past the end.
             lanadb_send_paste_locked(text);

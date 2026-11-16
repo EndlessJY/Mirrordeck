@@ -488,8 +488,8 @@ inverse_point(struct sc_point point, struct sc_size size,
 // LANADB: arrow-key swipes. A finger is pressed in the middle of the screen
 // and drawn over about 40% of its height in 14 steps (~170 ms), so apps see a
 // real fling. One swipe at a time; keys pressed meanwhile are ignored.
-#define LANADB_SWIPE_STEPS 14
-#define LANADB_SWIPE_STEP_MS 12
+#define MIRRORDECK_SWIPE_STEPS 14
+#define MIRRORDECK_SWIPE_STEP_MS 12
 
 static struct {
     struct sc_input_manager *im;
@@ -538,7 +538,7 @@ sc_lanadb_tap_center(void) {
 
 static bool
 lanadb_arrow_swipe_enabled(void) {
-    const char *value = getenv("LANADB_ARROW_SWIPE");
+    const char *value = getenv("MIRRORDECK_ARROW_SWIPE");
     return value && !strcmp(value, "1");
 }
 
@@ -566,8 +566,8 @@ lanadb_swipe_tick(void *userdata, SDL_TimerID timer, Uint32 interval) {
     (void) timer;
     int step = ++lanadb_swipe_state.step;
     int32_t from = lanadb_swipe_state.from_y, to = lanadb_swipe_state.to_y;
-    int32_t y = from + (to - from) * step / LANADB_SWIPE_STEPS;
-    if (step < LANADB_SWIPE_STEPS) {
+    int32_t y = from + (to - from) * step / MIRRORDECK_SWIPE_STEPS;
+    if (step < MIRRORDECK_SWIPE_STEPS) {
         lanadb_swipe_touch(AMOTION_EVENT_ACTION_MOVE, y);
         return interval;
     }
@@ -595,7 +595,7 @@ lanadb_swipe(struct sc_input_manager *im, bool next) {
     lanadb_swipe_state.step = 0;
     lanadb_swipe_touch(AMOTION_EVENT_ACTION_DOWN, lanadb_swipe_state.from_y);
     lanadb_swipe_state.timer =
-        SDL_AddTimer(LANADB_SWIPE_STEP_MS, lanadb_swipe_tick, NULL);
+        SDL_AddTimer(MIRRORDECK_SWIPE_STEP_MS, lanadb_swipe_tick, NULL);
 }
 
 static void

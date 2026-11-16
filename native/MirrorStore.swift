@@ -36,8 +36,8 @@ final class MirrorStore: ObservableObject {
     private var revealAutomatically: Bool {
         UserDefaults.standard.object(forKey: Self.revealInFinderKey) as? Bool ?? false
     }
-    private static let actionName = Notification.Name("uk.agpt.lanadbmanager.mirror.action")
-    private static let stateName = Notification.Name("uk.agpt.lanadbmanager.mirror.state")
+    private static let actionName = Notification.Name("uk.agpt.mirrordeck.mirror.action")
+    private static let stateName = Notification.Name("uk.agpt.mirrordeck.mirror.state")
 
     @Published private(set) var sessions: [String: MirrorSession] = [:]
     @Published private(set) var errors: [String: String] = [:]
@@ -73,7 +73,7 @@ final class MirrorStore: ObservableObject {
     private static let bundlePrepLock = NSLock()
     private static let cachedBinaryVersion: String? = {
         let sourceBinary = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Helpers/LANADBMirror.app/Contents/MacOS/scrcpy")
+            .appendingPathComponent("Contents/Helpers/MirrordeckMirror.app/Contents/MacOS/scrcpy")
         guard let binary = try? Data(contentsOf: sourceBinary) else { return nil }
         return SHA256.hash(data: binary).prefix(5)
             .map { String(format: "%02x", Int($0)) }.joined()
@@ -97,7 +97,7 @@ final class MirrorStore: ObservableObject {
         defer { Self.bundlePrepLock.unlock() }
 
         let source = Bundle.main.bundleURL.appendingPathComponent(
-            "Contents/Helpers/LANADBMirror.app", isDirectory: true)
+            "Contents/Helpers/MirrordeckMirror.app", isDirectory: true)
         let sourceBinary = source.appendingPathComponent("Contents/MacOS/scrcpy")
         let version: String
         if let cached = Self.cachedBinaryVersion {
@@ -111,7 +111,7 @@ final class MirrorStore: ObservableObject {
         let identity = SHA256.hash(data: Data(keyIdentity.utf8)).prefix(8)
             .map { String(format: "%02x", Int($0)) }.joined()
         let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/LAN ADB Manager/Mirrors",
+            .appendingPathComponent("Library/Application Support/Mirrordeck/Mirrors",
                                   isDirectory: true)
         // The Dock shows the bundle's folder name, so the .app is named after
         // the device and kept in a folder keyed by device and build.
@@ -175,7 +175,7 @@ final class MirrorStore: ObservableObject {
         let keyIdentity = storageIdentity(for: device)
         let identity = SHA256.hash(data: Data(keyIdentity.utf8)).prefix(8)
             .map { String(format: "%02x", Int($0)) }.joined()
-        return "uk.agpt.lanadbmanager.mirror.\(identity)"
+        return "uk.agpt.mirrordeck.mirror.\(identity)"
     }
 
     private static func bundleName(for title: String) -> String {
@@ -183,7 +183,7 @@ final class MirrorStore: ObservableObject {
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty || cleaned.hasPrefix(".") ? "LANADBMirror" : cleaned
+        return cleaned.isEmpty || cleaned.hasPrefix(".") ? "MirrordeckMirror" : cleaned
     }
 
     /// Deletes per-device copies built from an older scrcpy binary, plus the
@@ -241,7 +241,7 @@ final class MirrorStore: ObservableObject {
                 .flatMap { url -> URL? in
                     let temporary = FileManager.default.temporaryDirectory.standardizedFileURL.path
                     return url.standardizedFileURL.deletingLastPathComponent().path == temporary &&
-                        url.lastPathComponent.hasPrefix("lanadb-snapshot-") ? url : nil
+                        url.lastPathComponent.hasPrefix("mirrordeck-snapshot-") ? url : nil
                 }
             DeviceActions.saveScreenshot(of: device, serial: session.endpoint,
                                          fallback: fallback, title: appWindowTitles[id],
@@ -384,7 +384,7 @@ final class MirrorStore: ObservableObject {
                                 options: MirrorOptions, kind: String, isGIF: Bool,
                                 destination: URL, tools: URL, scrcpy: URL) {
         let url = isGIF ? FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).mp4") : destination
+            .appendingPathComponent("mirrordeck-gif-\(UUID().uuidString).mp4") : destination
         let adb = tools.appendingPathComponent("adb")
         let server = tools.appendingPathComponent("scrcpy-server")
         guard FileManager.default.isExecutableFile(atPath: scrcpy.path),
@@ -427,7 +427,7 @@ final class MirrorStore: ObservableObject {
         var environment = ProcessInfo.processInfo.environment
         environment["ADB"] = adb.path
         environment["SCRCPY_SERVER_PATH"] = server.path
-        environment["LANADB_GAMUT"] = "srgb"
+        environment["MIRRORDECK_GAMUT"] = "srgb"
         environment["PATH"] = "\(tools.path):/usr/bin:/bin:/usr/sbin:/sbin"
         environment.removeValue(forKey: "ANDROID_SERIAL")
         environment.removeValue(forKey: "ADB_SERVER_SOCKET")
@@ -435,7 +435,7 @@ final class MirrorStore: ObservableObject {
         environment.removeValue(forKey: "ANDROID_ADB_SERVER_PORT")
         recorder.environment = environment
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lan-adb-recording-\(UUID().uuidString).log")
+            .appendingPathComponent("mirrordeck-recording-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: logURL.path, contents: nil),
               let logHandle = try? FileHandle(forWritingTo: logURL) else {
             let message = "无法创建录屏诊断记录。"
@@ -619,7 +619,7 @@ final class MirrorStore: ObservableObject {
             return
         }
         let source = isGIF ? FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-gif-\(UUID().uuidString).mp4") : destination
+            .appendingPathComponent("mirrordeck-gif-\(UUID().uuidString).mp4") : destination
         appRecordings[id] = AppRecording(kind: kind, destination: destination, source: source)
         if let endpoint = sessions[id]?.endpoint { PhoneQuiet.begin(serial: endpoint) }
         if let current = sessions[id] {
@@ -684,7 +684,7 @@ final class MirrorStore: ObservableObject {
         guard let image = try? generator.copyCGImage(at: CMTime(seconds: 0.2, preferredTimescale: 600),
                                                      actualTime: nil) else { return nil }
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-poster-\(UUID().uuidString).png")
+            .appendingPathComponent("mirrordeck-poster-\(UUID().uuidString).png")
         guard let destination = CGImageDestinationCreateWithURL(
             url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, nil)
@@ -813,21 +813,21 @@ final class MirrorStore: ObservableObject {
 
         var environment = ProcessInfo.processInfo.environment
         environment["ADB"] = adb.path
-        environment["LANADB_ADB"] = adb.path
-        environment["LANADB_SERIAL"] = transport.endpoint
+        environment["MIRRORDECK_ADB"] = adb.path
+        environment["MIRRORDECK_SERIAL"] = transport.endpoint
         let actionToken = UUID().uuidString
-        environment["LANADB_SESSION_TOKEN"] = actionToken
-        environment["LANADB_RECORDING"] = "0"
-        environment["LANADB_AUDIO_ENABLED"] = options.audio ? "1" : "0"
-        environment["LANADB_ARROW_SWIPE"] = Self.arrowSwipe ? "1" : "0"
+        environment["MIRRORDECK_SESSION_TOKEN"] = actionToken
+        environment["MIRRORDECK_RECORDING"] = "0"
+        environment["MIRRORDECK_AUDIO_ENABLED"] = options.audio ? "1" : "0"
+        environment["MIRRORDECK_ARROW_SWIPE"] = Self.arrowSwipe ? "1" : "0"
         // The first mirror after installing points at the ⌘/ shortcut sheet.
         if !UserDefaults.standard.bool(forKey: "tips.shortcutSheet") {
             UserDefaults.standard.set(true, forKey: "tips.shortcutSheet")
-            environment["LANADB_SHORTCUT_TIP"] = "1"
+            environment["MIRRORDECK_SHORTCUT_TIP"] = "1"
         }
-        environment["LANADB_GAMUT"] = "srgb"
-        environment["LANADB_THEME"] = "classic"
-        environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
+        environment["MIRRORDECK_GAMUT"] = "srgb"
+        environment["MIRRORDECK_THEME"] = "classic"
+        environment["MIRRORDECK_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
         environment["SCRCPY_SERVER_PATH"] = server.path
         environment["SCRCPY_ICON_DIR"] = tools.path
         environment["PATH"] = "\(tools.path):/usr/bin:/bin:/usr/sbin:/sbin"
@@ -838,7 +838,7 @@ final class MirrorStore: ObservableObject {
         process.environment = environment
 
         let logURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lan-adb-scrcpy-\(UUID().uuidString).log")
+            .appendingPathComponent("mirrordeck-scrcpy-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: logURL.path, contents: nil),
               let logHandle = try? FileHandle(forWritingTo: logURL) else {
             errors[id] = "无法创建投屏诊断记录。"

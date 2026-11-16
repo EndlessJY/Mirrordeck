@@ -132,8 +132,8 @@ final class DeviceLogStore: ObservableObject {
     private var nextID = 0
     private var buffer = ""
     private var pending: [LogEntry] = []
-    private let queue = DispatchQueue(label: "lanadb.logs")
-    private let filterQueue = DispatchQueue(label: "lanadb.logs.filter", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "mirrordeck.logs")
+    private let filterQueue = DispatchQueue(label: "mirrordeck.logs.filter", qos: .userInitiated)
     private var filterWork: DispatchWorkItem?
     private var filterGeneration = 0
     private var flushTimer: Timer?

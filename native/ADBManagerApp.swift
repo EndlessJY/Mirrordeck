@@ -218,7 +218,7 @@ enum Worker {
                 environment["PYTHONDONTWRITEBYTECODE"] = "1"
                 environment["PYTHONUNBUFFERED"] = "1"
                 // One run of the app (see restart_server's cool-down).
-                environment["LANADB_APP_SESSION"] = "\(ProcessInfo.processInfo.processIdentifier)"
+                environment["MIRRORDECK_APP_SESSION"] = "\(ProcessInfo.processInfo.processIdentifier)"
                 process.environment = environment
 
                 let input = Pipe()
@@ -280,7 +280,7 @@ final class DiscoveryMonitor: NSObject, NetServiceBrowserDelegate {
 
     private var browsers: [NetServiceBrowser] = []
     private let networkMonitor = NWPathMonitor()
-    private let networkQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.network")
+    private let networkQueue = DispatchQueue(label: "uk.agpt.mirrordeck.network")
     private var tracker: Process?
     private let appleMonitor = AppleDeviceMonitor()
     private var stopped = false
@@ -926,7 +926,7 @@ final class DeviceInfoStore: ObservableObject {
         var version: Int?
     }
     private static let cacheVersion = 3
-    private static let persistQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.deviceinfo", qos: .utility)
+    private static let persistQueue = DispatchQueue(label: "uk.agpt.mirrordeck.deviceinfo", qos: .utility)
 
     @Published private(set) var sections: [String: [DeviceInfoSection]] = [:]
     @Published private(set) var loading: Set<String> = []
@@ -942,7 +942,7 @@ final class DeviceInfoStore: ObservableObject {
 
     private static var cacheURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/LAN ADB Manager/device_info.json")
+            .appendingPathComponent("Library/Application Support/Mirrordeck/device_info.json")
     }
 
     private init() {
@@ -2193,7 +2193,24 @@ struct LANADBManagerApp: App {
     /// rebuilds the main menu) on every defaults write, which loops.
     @StateObject private var menuBar = MenuBarSettings.shared
 
+    private static var firstWindowSize: CGSize {
+        let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
+        // Half the screen, but no wider than reads well (860).
+        return CGSize(width: max(720, min(860, (screen.width / 2).rounded())),
+                      height: max(500, (screen.height / 2).rounded()))
+    }
+
     init() {
+        // Before anything reads a setting or a file (see AppSupport).
+        AppSupport.migrateFromOldName()
+        // The main window opens at its default size and place every launch:
+        // its remembered frame (and old builds' leftovers) is dropped first.
+        let defaults = UserDefaults.standard
+        for key in defaults.dictionaryRepresentation().keys
+        where key.hasPrefix("NSWindow Frame main") || key.hasPrefix("NSWindow Frame SwiftUI.WindowGroup")
+            || key.hasPrefix("NSSplitView Subview Frames") {
+            defaults.removeObject(forKey: key)
+        }
         OverlayScrollers.install()
     }
 
@@ -2201,6 +2218,10 @@ struct LANADBManagerApp: App {
         WindowGroup(id: "main") {
             ContentView()
         }
+        // Every launch: half the screen (at most 860 wide), centred, never
+        // below the window's minimum (the remembered frame is dropped in init).
+        .defaultSize(Self.firstWindowSize)
+        .defaultPosition(.center)
         .windowStyle(.titleBar)
         // A low title bar with small buttons; the name sits in the sidebar.
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))

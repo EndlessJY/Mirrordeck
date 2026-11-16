@@ -18,7 +18,7 @@ from typing import Callable
 import ios_devices
 
 
-APP_DIR = Path.home() / "Library" / "Application Support" / "LAN ADB Manager"
+APP_DIR = Path.home() / "Library" / "Application Support" / "Mirrordeck"
 KNOWN_FILE = APP_DIR / "known_endpoints.json"
 TCPIP_FILE = APP_DIR / "tcpip_attempts.json"
 USB_WIRELESS_FILE = APP_DIR / "usb_wireless_endpoints.json"
@@ -288,7 +288,7 @@ def market_name(props: dict[str, str]) -> str:
     return ""
 
 
-INFO_SEPARATOR = "__LANADB_INFO__"
+INFO_SEPARATOR = "__MIRRORDECK_INFO__"
 # Properties that do not change while the device runs; cached by the app.
 STATIC_INFO_COMMANDS = {
     "getprop": "getprop 2>/dev/null",
@@ -658,7 +658,7 @@ class AdbLan:
         # scan; without a cool-down a lasting "no route" would restart it
         # again and again. The cool-down holds within one run of the app
         # only: after a relaunch the server is restarted right away.
-        session = os.environ.get("LANADB_APP_SESSION", "")
+        session = os.environ.get("MIRRORDECK_APP_SESSION", "")
         try:
             recent = time.time() - SERVER_RESTART_FILE.stat().st_mtime < SERVER_RESTART_COOLDOWN
             if recent and SERVER_RESTART_FILE.read_text().strip() == session:

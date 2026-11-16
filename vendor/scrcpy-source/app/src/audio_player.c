@@ -21,7 +21,7 @@ bool sc_audio_player_is_muted(void) {
 static atomic_int sc_playback_level = SC_VOLUME_STEPS;
 
 bool sc_audio_player_local_volume(void) {
-    const char *own = getenv("LANADB_APP_OWN_AUDIO");
+    const char *own = getenv("MIRRORDECK_APP_OWN_AUDIO");
     return own && !strcmp(own, "1");
 }
 

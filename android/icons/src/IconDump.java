@@ -18,7 +18,7 @@ import java.io.PrintStream;
  * Prints the launcher icon of each given package as "package base64-png",
  * or "package -" when it has none. Run with app_process from adb shell:
  *
- *   CLASSPATH=/data/local/tmp/lanadb-icons.dex app_process / IconDump 96 pkg...
+ *   CLASSPATH=/data/local/tmp/mirrordeck-icons.dex app_process / IconDump 96 pkg...
  */
 public final class IconDump {
     private static Drawable launcherIcon(PackageManager manager, String name) throws Exception {

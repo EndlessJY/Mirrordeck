@@ -232,7 +232,7 @@ lanadb_detect_colors(AVStream *stream, const AVPacket *packet) {
     // The device composes its screen in its display gamut with the sRGB
     // curve (Display P3 on wide-gamut phones) but tags the stream as BT.601.
     // Describe what is really there so players match the phone and mirror.
-    const char *gamut = getenv("LANADB_GAMUT");
+    const char *gamut = getenv("MIRRORDECK_GAMUT");
     if (gamut && !strcmp(gamut, "p3")) {
         par->color_primaries = AVCOL_PRI_SMPTE432;
         par->color_trc = AVCOL_TRC_IEC61966_2_1;

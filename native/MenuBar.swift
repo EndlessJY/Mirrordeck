@@ -92,8 +92,8 @@ struct MenuBarContent: View {
 }
 
 extension Notification.Name {
-    static let showCaptureHistory = Notification.Name("uk.agpt.lanadbmanager.showCaptureHistory")
-    static let toggleCaptureHistory = Notification.Name("uk.agpt.lanadbmanager.toggleCaptureHistory")
+    static let showCaptureHistory = Notification.Name("uk.agpt.mirrordeck.showCaptureHistory")
+    static let toggleCaptureHistory = Notification.Name("uk.agpt.mirrordeck.toggleCaptureHistory")
 }
 
 enum MenuBarActions {
@@ -482,7 +482,7 @@ struct TitleBarTrailingButtons: NSViewRepresentable {
         }
     }
 
-    static let id = NSUserInterfaceItemIdentifier("uk.agpt.lanadbmanager.titlebarTrailing")
+    static let id = NSUserInterfaceItemIdentifier("uk.agpt.mirrordeck.titlebarTrailing")
 }
 
 private struct TitleBarTrailingContent: View {
@@ -521,7 +521,7 @@ struct TitleBarLeadingButtons: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { InstallerView() }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
-    static let id = NSUserInterfaceItemIdentifier("uk.agpt.lanadbmanager.titlebarLeading")
+    static let id = NSUserInterfaceItemIdentifier("uk.agpt.mirrordeck.titlebarLeading")
     /// Left end of the button while the sidebar is closed (after the window
     /// buttons).
     static let collapsedX: CGFloat = 80

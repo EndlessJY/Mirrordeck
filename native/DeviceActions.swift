@@ -56,9 +56,9 @@ enum DeviceActions {
     static func removeTemporaryFiles() {
         let folder = FileManager.default.temporaryDirectory
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
-        for name in names where name.hasPrefix("lanadb-snapshot-") || name.hasPrefix("lanadb-poster-")
-            || name.hasPrefix("lanadb-gif-") || name.hasPrefix("lanadb-icon-") || name.hasPrefix("lanadb-ios-")
-            || name.hasPrefix("lan-adb-scrcpy-") || name.hasPrefix("lan-adb-recording-") {
+        for name in names where name.hasPrefix("mirrordeck-snapshot-") || name.hasPrefix("mirrordeck-poster-")
+            || name.hasPrefix("mirrordeck-gif-") || name.hasPrefix("mirrordeck-icon-") || name.hasPrefix("mirrordeck-ios-")
+            || name.hasPrefix("mirrordeck-scrcpy-") || name.hasPrefix("mirrordeck-recording-") {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
         }
     }

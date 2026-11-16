@@ -5,9 +5,9 @@
     <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
     <key>CFBundleDisplayName</key><string>幕台投屏</string>
     <key>CFBundleExecutable</key><string>scrcpy</string>
-    <key>CFBundleIdentifier</key><string>uk.agpt.lanadbmanager.mirror</string>
+    <key>CFBundleIdentifier</key><string>uk.agpt.mirrordeck.mirror</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>LANADBMirror</string>
+    <key>CFBundleName</key><string>MirrordeckMirror</string>
     <key>CFBundleIconFile</key><string>AppIcon.icns</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>4.0.0</string>

@@ -575,7 +575,7 @@ class TransportKindTests(unittest.TestCase):
         self.assertFalse(adb_lan.is_network_transport("d537dfe4"))
 
     def test_scrcpy_commands_requests_unlimited_width_for_long_bundle_paths(self):
-        long_prefix = "/Users/tester/Library/Application Support/LAN ADB Manager/Mirrors/0123456789abcdef/Xiaomi 15 Pro.app"
+        long_prefix = "/Users/tester/Library/Application Support/Mirrordeck/Mirrors/0123456789abcdef/Xiaomi 15 Pro.app"
         ps_line = f"{long_prefix}/Contents/MacOS/scrcpy --serial=0123abcd --window-title=Xiaomi\n"
         captured = []
 

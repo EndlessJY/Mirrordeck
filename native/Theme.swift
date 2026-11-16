@@ -32,7 +32,7 @@ final class ThemeStore: ObservableObject {
     static let shared = ThemeStore()
     static let styleKey = "ui.themeStyle"
     static let appearanceKey = "ui.appearanceMode"
-    static let notificationName = Notification.Name("uk.agpt.lanadbmanager.theme")
+    static let notificationName = Notification.Name("uk.agpt.mirrordeck.theme")
 
     @Published var appearanceMode: AppAppearanceMode {
         didSet {

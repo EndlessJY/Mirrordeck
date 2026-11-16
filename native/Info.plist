@@ -4,8 +4,8 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
     <key>CFBundleDisplayName</key><string>幕台</string>
-    <key>CFBundleExecutable</key><string>LANADBManager</string>
-    <key>CFBundleIdentifier</key><string>uk.agpt.lanadbmanager</string>
+    <key>CFBundleExecutable</key><string>Mirrordeck</string>
+    <key>CFBundleIdentifier</key><string>uk.agpt.mirrordeck</string>
     <key>CFBundleIconFile</key><string>AppIcon.icns</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>幕台</string>

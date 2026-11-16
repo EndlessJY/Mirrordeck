@@ -180,8 +180,8 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     private let movieOutput = AVCaptureMovieFileOutput()
     private let audioPreview = AVCaptureAudioPreviewOutput()
     private let ciContext = CIContext()
-    private let frameQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.frames")
-    private let sessionQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.session")
+    private let frameQueue = DispatchQueue(label: "uk.agpt.mirrordeck.ios.frames")
+    private let sessionQueue = DispatchQueue(label: "uk.agpt.mirrordeck.ios.session")
     private var latestFrame: CVPixelBuffer?
     private var window: NSWindow?
     private var previewLayer: AVCaptureVideoPreviewLayer?
@@ -566,7 +566,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
             return
         }
         let source = FileManager.default.temporaryDirectory
-            .appendingPathComponent("lanadb-ios-\(UUID().uuidString).mov")
+            .appendingPathComponent("mirrordeck-ios-\(UUID().uuidString).mov")
         // H.265 when a dedicated video connection supports it (.muxed connections
         // carry their own compressed stream and are remuxed below).
         if let connection = movieOutput.connection(with: .video), connection.isActive {
@@ -727,7 +727,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         writer.startSession(atSourceTime: .zero)
 
         let group = DispatchGroup()
-        let videoQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.remux.video")
+        let videoQueue = DispatchQueue(label: "uk.agpt.mirrordeck.ios.remux.video")
         group.enter()
         var videoFinished = false
         videoIn.requestMediaDataWhenReady(on: videoQueue) {
@@ -749,7 +749,7 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         }
 
         if let (audioOut, audioIn) = audioPair {
-            let audioQueue = DispatchQueue(label: "uk.agpt.lanadbmanager.ios.remux.audio")
+            let audioQueue = DispatchQueue(label: "uk.agpt.mirrordeck.ios.remux.audio")
             group.enter()
             var audioFinished = false
             audioIn.requestMediaDataWhenReady(on: audioQueue) {
