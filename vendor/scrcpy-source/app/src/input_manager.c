@@ -6,6 +6,7 @@
 #include <SDL3/SDL.h>
 
 #include "android/input.h"
+#include "audio_player.h"
 #include "android/keycodes.h"
 #include "events.h"
 #include "input_events.h"
@@ -121,8 +122,22 @@ action_home(struct sc_input_manager *im, enum sc_action action) {
     send_keycode(im, AKEYCODE_HOME, action, "HOME");
 }
 
+// LANADB: while the phone's screen is off (or showing its always-on
+// display, which takes no touches), a click or key wakes it instead of going
+// to the phone. True when it did.
+bool sc_lanadb_wake_if_asleep(void);
+static bool sc_lanadb_swallow_mouse_up;
+
+// LANADB: a single-app window on its app's first page takes Back itself
+// (asks once more, then closes the window), so the app never gets it and
+// shows no "press again to exit" toast on the phone's main screen.
+bool sc_lanadb_app_back(bool down);
+
 static inline void
 action_back(struct sc_input_manager *im, enum sc_action action) {
+    if (sc_lanadb_app_back(action == SC_ACTION_DOWN)) {
+        return;
+    }
     send_keycode(im, AKEYCODE_BACK, action, "BACK");
 }
 
@@ -136,13 +151,27 @@ action_power(struct sc_input_manager *im, enum sc_action action) {
     send_keycode(im, AKEYCODE_POWER, action, "POWER");
 }
 
+void sc_lanadb_volume_changed(int level);
+
 static inline void
 action_volume_up(struct sc_input_manager *im, enum sc_action action) {
+    if (sc_audio_player_local_volume()) {
+        if (action == SC_ACTION_DOWN) {
+            sc_lanadb_volume_changed(sc_audio_player_step_volume(1));
+        }
+        return;
+    }
     send_keycode(im, AKEYCODE_VOLUME_UP, action, "VOLUME_UP");
 }
 
 static inline void
 action_volume_down(struct sc_input_manager *im, enum sc_action action) {
+    if (sc_audio_player_local_volume()) {
+        if (action == SC_ACTION_DOWN) {
+            sc_lanadb_volume_changed(sc_audio_player_step_volume(-1));
+        }
+        return;
+    }
     send_keycode(im, AKEYCODE_VOLUME_DOWN, action, "VOLUME_DOWN");
 }
 
@@ -587,6 +616,20 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     bool ctrl = mod & SDL_KMOD_CTRL;
     bool shift = mod & SDL_KMOD_SHIFT;
     bool repeat = event->repeat;
+
+    // Plain keys only: shortcuts (⌘S…) and lone modifiers don't wake it.
+    if (down && !repeat && im->controller
+            && !(mod & (SDL_KMOD_GUI | SDL_KMOD_CTRL | SDL_KMOD_ALT))
+            && !(sdl_keycode & SDLK_SCANCODE_MASK)
+            && sc_lanadb_wake_if_asleep()) {
+        return;
+    }
+
+    // Escape acts as Back on Android: the same first-page check applies.
+    if (sdl_keycode == SDLK_ESCAPE && !mod && !repeat
+            && sc_lanadb_app_back(down)) {
+        return;
+    }
 
     // Either the modifier includes a shortcut modifier, or the key
     // press/release is a modifier key.
@@ -1045,6 +1088,15 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool paused = im->screen->paused;
     bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
 
+    if (down && control && sc_lanadb_wake_if_asleep()) {
+        sc_lanadb_swallow_mouse_up = true;
+        return;
+    }
+    if (!down && sc_lanadb_swallow_mouse_up) {
+        sc_lanadb_swallow_mouse_up = false;
+        return;
+    }
+
     enum sc_mouse_button button = sc_mouse_button_from_sdl(event->button);
     if (button == SC_MOUSE_BUTTON_UNKNOWN) {
         return;
@@ -1073,6 +1125,9 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
                 // ignore click
                 return;
             case SC_MOUSE_BINDING_BACK:
+                if (sc_lanadb_app_back(action == SC_ACTION_DOWN)) {
+                    return;
+                }
                 if (im->kp) {
                     press_back_or_turn_screen_on(im, action);
                 }

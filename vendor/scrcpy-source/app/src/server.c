@@ -299,6 +299,9 @@ execute_server(struct sc_server *server,
         ADD_PARAM("audio_source=%s",
                   sc_server_get_audio_source_name(params->audio_source));
     }
+    if (params->audio_uid >= 0) {
+        ADD_PARAM("audio_uid=%" PRIi32, params->audio_uid);
+    }
     if (params->audio_dup) {
         ADD_PARAM("audio_dup=true");
     }

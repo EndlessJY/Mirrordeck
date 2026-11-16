@@ -4,6 +4,7 @@
 #include "util/memory.h"
 #include "SDL3/SDL_hints.h"
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 static atomic_bool sc_playback_muted = true;
@@ -14,6 +15,21 @@ void sc_audio_player_set_muted(bool muted) {
 
 bool sc_audio_player_is_muted(void) {
     return atomic_load(&sc_playback_muted);
+}
+
+#define SC_VOLUME_STEPS 10
+static atomic_int sc_playback_level = SC_VOLUME_STEPS;
+
+bool sc_audio_player_local_volume(void) {
+    const char *own = getenv("LANADB_APP_OWN_AUDIO");
+    return own && !strcmp(own, "1");
+}
+
+int sc_audio_player_step_volume(int delta) {
+    int level = atomic_load(&sc_playback_level) + delta;
+    level = level < 0 ? 0 : level > SC_VOLUME_STEPS ? SC_VOLUME_STEPS : level;
+    atomic_store(&sc_playback_level, level);
+    return level;
 }
 
 /** Downcast frame_sink to sc_audio_player */
@@ -40,6 +56,17 @@ sc_audio_player_stream_callback(void *userdata, SDL_AudioStream *stream,
                                 out_samples);
         if (sc_audio_player_is_muted()) {
             memset(ap->aout_buffer, 0, chunk_size);
+        } else {
+            int level = atomic_load(&sc_playback_level);
+            if (level < SC_VOLUME_STEPS) {
+                // Squared, so the steps sound even to the ear.
+                float gain = (float) (level * level) / (SC_VOLUME_STEPS * SC_VOLUME_STEPS);
+                float *samples = (float *) ap->aout_buffer;
+                size_t n = chunk_size / sizeof(float);
+                for (size_t i = 0; i < n; ++i) {
+                    samples[i] *= gain;
+                }
+            }
         }
 
         assert(chunk_size <= len);

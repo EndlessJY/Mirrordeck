@@ -92,6 +92,7 @@ enum {
     OPT_MOUSE_BIND,
     OPT_NO_MOUSE_HOVER,
     OPT_AUDIO_DUP,
+    OPT_AUDIO_UID,
     OPT_GAMEPAD,
     OPT_NEW_DISPLAY,
     OPT_LIST_APPS,
@@ -202,6 +203,15 @@ static const struct sc_option options[] = {
         .text = "Duplicate audio (capture and keep playing on the device).\n"
                 "This feature is only available with --audio-source=playback."
 
+    },
+    {
+        .longopt_id = OPT_AUDIO_UID,
+        .longopt = "audio-uid",
+        .argdesc = "uid",
+        .text = "Capture only the audio played by the app with this uid, "
+                "which then no longer plays on the device or in other "
+                "captures.\n"
+                "This feature is only available with --audio-source=playback.",
     },
     {
         .longopt_id = OPT_AUDIO_ENCODER,
@@ -2939,6 +2949,15 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_AUDIO_DUP:
                 opts->audio_dup = true;
                 break;
+            case OPT_AUDIO_UID: {
+                long uid;
+                if (!parse_integer_arg(optarg, &uid, false, 0, 0x7FFFFFFF,
+                                       "audio uid")) {
+                    return false;
+                }
+                opts->audio_uid = (int32_t) uid;
+                break;
+            }
             case 'G':
                 opts->gamepad_input_mode = SC_GAMEPAD_INPUT_MODE_UHID_OR_AOA;
                 break;

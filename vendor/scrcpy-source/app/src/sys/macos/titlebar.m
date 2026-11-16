@@ -19,6 +19,9 @@ enum { LANADB_FORMAT_MP4 = 1, LANADB_FORMAT_MKV = 2 };
 bool sc_lanadb_snapshot(uint8_t **rgba, int *width, int *height);
 void *sc_lanadb_snapshot_buffer(void);
 bool sc_audio_player_is_muted(void);
+bool sc_audio_player_local_volume(void);
+int sc_audio_player_step_volume(int delta);
+void sc_lanadb_volume_changed(int level);
 
 enum {
     SC_BUTTON_PIN,
@@ -435,6 +438,7 @@ enum {
 @property(nonatomic) BOOL audioAvailable;
 @property(nonatomic) BOOL screenAwake;
 @property(nonatomic) BOOL screenKnown;
+@property(nonatomic, strong) NSTimer *screenWatch;
 @property(nonatomic) BOOL displayOff;
 @property(nonatomic) NSInteger sdkLevel;
 // LANADB: a single app on its own virtual display. Device-wide controls
@@ -552,6 +556,7 @@ enum {
         [self updateLayout];
         [self updateButtons];
         [self refreshDeviceState];
+        [self startScreenWatch];
         [self showLaunchOverlay];
         // Only Space here (see handleSpace:); the editing shortcuts stay on
         // scrcpy's own path in this window.
@@ -561,6 +566,7 @@ enum {
     [self updateLayout];
     [self updateButtons];
     [self refreshDeviceState];
+    [self startScreenWatch];
     [self installEditingShortcuts];
     return self;
 }
@@ -921,6 +927,20 @@ enum {
 - (void)showSavedNotice:(BOOL)copied {
     [self showNotice:copied ? @"已复制到剪贴板" : @"已保存" symbol:@"checkmark.circle.fill"
                color:NSColor.systemGreenColor duration:1.6];
+}
+
+/// Back on the app's first page would leave the app (and many apps then show
+/// a "press again to exit" toast on the phone's main screen): ask once more,
+/// then close the window, which closes the app with it. The app gets no Back.
+- (void)rootBack {
+    if (self.rootBackAt && -[self.rootBackAt timeIntervalSinceNow] < 2.0) {
+        self.rootBackAt = nil;
+        [self.targetWindow performClose:nil];
+    } else {
+        self.rootBackAt = [NSDate date];
+        [self showNotice:@"再按一次返回关闭窗口" symbol:@"arrow.uturn.backward.circle.fill"
+                   color:NSColor.whiteColor duration:2.0];
+    }
 }
 
 /// A short message in the recording clock's place (not while recording).
@@ -1610,6 +1630,34 @@ enum {
     return [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
 }
 
+/// Wakes the phone (KEYCODE_WAKEUP), for a click or key on a sleeping one.
+- (void)wakeScreen {
+    ++self.stateRevision;
+    self.screenAwake = YES;
+    [self updateButtons];
+    [self showNotice:@"已唤醒屏幕" symbol:@"sun.max.fill" color:NSColor.whiteColor duration:1.4];
+    dispatch_async(self.actionQueue, ^{
+        @autoreleasepool {
+            [self runADB:@[@"input", @"keyevent", @"224"] timeout:5];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [self refreshDeviceState]; });
+        }
+    });
+}
+
+/// While the window is in front, the phone's screen state is checked every
+/// few seconds (it can sleep on its own, or light up its always-on display).
+- (void)startScreenWatch {
+    __weak LANADBTitlebarController *weakSelf = self;
+    self.screenWatch = [NSTimer scheduledTimerWithTimeInterval:3 repeats:YES block:^(NSTimer *timer) {
+        LANADBTitlebarController *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.targetWindow) { [timer invalidate]; return; }
+        if (strongSelf.targetWindow.isKeyWindow && !strongSelf.displayOff) {
+            [strongSelf refreshDeviceState];
+        }
+    }];
+}
+
 - (void)refreshDeviceState {
     NSUInteger revision = self.stateRevision;
     dispatch_async(self.statusQueue, ^{
@@ -1623,6 +1671,7 @@ enum {
                 if (revision != self.stateRevision || !self.targetWindow) {
                     return;
                 }
+                BOOL wasAwake = !self.screenKnown || self.screenAwake;
                 if ([power containsString:@"mWakefulness=Awake"]) {
                     self.screenKnown = YES;
                     self.screenAwake = YES;
@@ -1630,6 +1679,12 @@ enum {
                            [power containsString:@"mWakefulness=Dozing"]) {
                     self.screenKnown = YES;
                     self.screenAwake = NO;
+                    // The picture may still show the always-on display, which
+                    // takes no touches: say how to get the phone back.
+                    if (wasAwake && !self.displayOff) {
+                        [self showNotice:@"手机已息屏，点按画面唤醒" symbol:@"moon.fill"
+                                   color:NSColor.whiteColor duration:3.0];
+                    }
                 }
                 [self updateButtons];
             });
@@ -1748,20 +1803,16 @@ enum {
         }
         return;
     }
+    if ((index == SC_BUTTON_VOLUME_DOWN || index == SC_BUTTON_VOLUME_UP) &&
+        sc_audio_player_local_volume()) {
+        // This window plays only its app's sound, taken before the phone's
+        // volume: the steps set this window's own volume.
+        sc_lanadb_volume_changed(sc_audio_player_step_volume(index == SC_BUTTON_VOLUME_UP ? 1 : -1));
+        return;
+    }
     if (self.appWindow && index == SC_BUTTON_BACK) {
         if (self.appAtRoot) {
-            // On the app's first page Back would leave the app: ask once more.
-            if (self.rootBackAt && -[self.rootBackAt timeIntervalSinceNow] < 2.0) {
-                self.rootBackAt = nil;
-                sc_lanadb_press_key(4);
-                NSWindow *window = self.targetWindow;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{ [window performClose:nil]; });
-            } else {
-                self.rootBackAt = [NSDate date];
-                [self showNotice:@"再按一次返回关闭窗口" symbol:@"arrow.uturn.backward.circle.fill"
-                           color:NSColor.whiteColor duration:2.0];
-            }
+            [self rootBack];
             return;
         }
         sc_lanadb_press_key(4); // AKEYCODE_BACK, on this window's display
@@ -1840,6 +1891,46 @@ lanadb_apply_gamut(NSWindow *window) {
 
 // LANADB: the window's title bar, for notices from C code (dropped files).
 static __weak LANADBTitlebarController *lanadb_active_titlebar;
+
+// LANADB: a click or key while the phone's screen is off wakes it instead.
+bool
+sc_lanadb_wake_if_asleep(void) {
+    LANADBTitlebarController *controller = lanadb_active_titlebar;
+    if (!controller || !controller.screenKnown || controller.screenAwake || controller.displayOff) {
+        return false;
+    }
+    [controller wakeScreen];
+    return true;
+}
+
+// LANADB: Back from the keyboard or mouse in a single-app window. True when
+// the window took it (the app is on its first page): see rootBack.
+bool
+sc_lanadb_app_back(bool down) {
+    LANADBTitlebarController *controller = lanadb_active_titlebar;
+    if (!controller || !controller.appWindow || !controller.appAtRoot) {
+        return false;
+    }
+    if (down) {
+        [controller rootBack];
+    }
+    return true;
+}
+
+// LANADB: this window's own volume moved (single-app window, see
+// sc_audio_player_local_volume); shown where notices go.
+void
+sc_lanadb_volume_changed(int level) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LANADBTitlebarController *controller = lanadb_active_titlebar;
+        if (!controller) { return; }
+        NSString *symbol = level == 0 ? @"speaker.slash.fill" :
+                           level < 4 ? @"speaker.wave.1.fill" :
+                           level < 8 ? @"speaker.wave.2.fill" : @"speaker.wave.3.fill";
+        [controller showNotice:[NSString stringWithFormat:@"窗口音量 %d%%", level * 10]
+                        symbol:symbol color:NSColor.whiteColor duration:1.2];
+    });
+}
 
 // LANADB: the picture got its first size, or turned (rotation).
 void

@@ -229,9 +229,14 @@ def usb_wireless_endpoint(endpoint: str) -> bool:
     ))
 
 
+# Each retry waits longer: a congested Wi-Fi can take over a second to
+# answer, and a device that is there should not read as gone.
+PROBE_TIMEOUTS = (0.6, 1.2, 2.0)
+
+
 def port_open_stable(endpoint: str, attempts: int = 3) -> bool:
     for attempt in range(attempts):
-        if port_open(endpoint, 0.45):
+        if port_open(endpoint, PROBE_TIMEOUTS[min(attempt, len(PROBE_TIMEOUTS) - 1)]):
             return True
         if attempt + 1 < attempts:
             time.sleep(0.12)
@@ -651,20 +656,23 @@ class AdbLan:
             return False
         # A restart reconnects the app's device tracker, which starts another
         # scan; without a cool-down a lasting "no route" would restart it
-        # again and again.
+        # again and again. The cool-down holds within one run of the app
+        # only: after a relaunch the server is restarted right away.
+        session = os.environ.get("LANADB_APP_SESSION", "")
         try:
-            if time.time() - SERVER_RESTART_FILE.stat().st_mtime < SERVER_RESTART_COOLDOWN:
+            recent = time.time() - SERVER_RESTART_FILE.stat().st_mtime < SERVER_RESTART_COOLDOWN
+            if recent and SERVER_RESTART_FILE.read_text().strip() == session:
                 return False
-        except OSError:
-            pass
-        try:
-            APP_DIR.mkdir(parents=True, exist_ok=True)
-            SERVER_RESTART_FILE.touch()
         except OSError:
             pass
         self.command("kill-server", timeout=5)
         self.command("start-server", timeout=6)
         self._last_server_restart = time.monotonic()
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            SERVER_RESTART_FILE.write_text(session)
+        except OSError:
+            pass
         return True
 
     def _device_prop(self, serial: str, prop: str) -> str:
@@ -814,13 +822,18 @@ class AdbLan:
             ips = self._wifi_ips(serial)
         return ips
 
-    def scan(self, include_subnet_scan: bool = True, usb_check: bool = False) -> dict:
+    def scan(self, include_subnet_scan: bool = True, usb_check: bool = False,
+             fresh_server: bool = False) -> dict:
         """`usb_check` is set for scans caused by a device connection or the
         app's launch: every USB device without wireless ADB is then set up,
-        even if an earlier attempt failed."""
+        even if an earlier attempt failed. `fresh_server` (the app's first
+        scan) restarts the ADB server: one left from an earlier run of the
+        app lost its local-network access with it, and reports "no route"."""
         with self._operation_lock:
             started = time.monotonic()
             self.progress("检查本机 ADB 与网卡")
+            if fresh_server:
+                self.restart_server()
             self._start_server()
             _code, ifconfig = run_command(["/sbin/ifconfig"], timeout=5)
             self.networks, notes = parse_interfaces(ifconfig)
@@ -984,7 +997,8 @@ class AdbLan:
                         outcomes[endpoint] = self._connect(endpoint, attempts=1)
                 after = self.devices()
             elif route_failures:
-                self.progress("投屏正在运行，保留 ADB 服务并稍后重试异常连接")
+                self.progress("投屏正在运行，保留 ADB 服务并稍后重试异常连接" if active_mirror_process()
+                              else "ADB 服务刚重启过，稍后重试异常连接")
 
             # One short retry for transient offline transports.
             for endpoint, item in list(after.items()):

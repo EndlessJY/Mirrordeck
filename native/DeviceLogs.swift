@@ -449,6 +449,7 @@ struct DeviceLogView: View {
     @ObservedObject private var apps = AppWindowStore.shared
     @ObservedObject private var theme = ThemeStore.shared
     @State private var follow = true
+    @State private var choosingApp = false
     @State private var selection = Set<Int>()
     @State private var inspectorCopied = false
 
@@ -459,36 +460,17 @@ struct DeviceLogView: View {
             toolbar(rows: rows)
             Divider()
             if store.crashCount > 0 && !store.crashesOnly {
-                if theme.isAppleNative {
-                    HStack {
-                        Label("捕获到 \(store.crashCount) 条崩溃异常记录",
-                              systemImage: "exclamationmark.octagon.fill")
-                            .font(.caption.weight(.medium))
-                        Spacer()
-                        Button("仅看崩溃栈") {
-                            store.crashesOnly = true
-                        }
-                        .buttonStyle(.borderless)
-                        .font(.caption.weight(.semibold))
-                    }
-                    .foregroundStyle(Theme.recording)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Theme.recording.opacity(0.11))
-                    Divider()
-                } else {
-                    Button {
-                        store.crashesOnly = true
-                    } label: {
-                        Label("发现 \(store.crashCount) 条崩溃记录，点按只看崩溃",
-                              systemImage: "exclamationmark.octagon.fill")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Color.red.opacity(0.85))
+                Button {
+                    store.crashesOnly = true
+                } label: {
+                    Label("发现 \(store.crashCount) 条崩溃记录，点按只看崩溃",
+                          systemImage: "exclamationmark.octagon.fill")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(Color.red.opacity(0.85))
             }
             ScrollViewReader { proxy in
                 List(rows, selection: $selection) { entry in
@@ -512,15 +494,11 @@ struct DeviceLogView: View {
                     proxy.scrollTo(last, anchor: .bottom)
                 }
             }
-            if theme.isAppleNative && !selectedEntries.isEmpty {
-                Divider()
-                nativeInspector(selectedEntries)
-            }
             Divider()
             statusBar(count: rows.count)
         }
         .tint(Theme.accent)
-        .frame(minWidth: 760, minHeight: 420)
+        .frame(minWidth: 600, minHeight: 360)
         .onAppear {
             store.start()
             if !store.device.isApple { apps.load(store.device) }
@@ -528,51 +506,6 @@ struct DeviceLogView: View {
         .onDisappear { store.stop() }
     }
 
-    private func nativeInspector(_ entries: [LogEntry]) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(entries.count == 1
-                     ? "选中行详情检视器（支持自由划词或一键整条复制）"
-                     : "已选中 \(entries.count) 行日志（支持自由划词或一键批量复制）")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ScrollView {
-                    Text(entries.map(\.text).joined(separator: "\n"))
-                        .font(.system(size: 11.5, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                .frame(maxHeight: 84)
-            }
-            HStack(spacing: 6) {
-                Button {
-                    copyLines(entries)
-                    withAnimation(Theme.quick) { inspectorCopied = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
-                        withAnimation(Theme.quick) { inspectorCopied = false }
-                    }
-                } label: {
-                    if inspectorCopied {
-                        Label("已复制", systemImage: "checkmark")
-                    } else {
-                        Text(entries.count == 1 ? "复制整条" : "复制选中")
-                    }
-                }
-                .controlSize(.small)
-                Button {
-                    selection.removeAll()
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .help("收起详情检视栏")
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Theme.subtleFill)
-    }
 
     private func copyLines(_ entries: [LogEntry]) {
         guard !entries.isEmpty else { return }
@@ -583,40 +516,20 @@ struct DeviceLogView: View {
 
     private func toolbar(rows: [LogEntry]) -> some View {
         HStack(spacing: 10) {
-            if theme.isAppleNative {
-                if !store.device.isApple {
-                    appPickerControl
-                }
-                Picker("级别", selection: $store.minimum) {
-                    ForEach(LogLevel.allCases) { Text($0.shortTitle).tag($0) }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .fixedSize()
-                Toggle(store.crashCount > 0 ? "崩溃 (\(store.crashCount))" : "只看崩溃",
-                       isOn: $store.crashesOnly)
-                    .toggleStyle(.button)
-                    .tint(store.crashesOnly ? Theme.recording : nil)
-                Spacer(minLength: 0)
-                TextField("筛选关键字 / Tag…", text: $store.query)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 170, maxWidth: 240)
-            } else {
-                TextField("搜索标签或内容", text: $store.query)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 180)
-                Picker("级别", selection: $store.minimum) {
-                    ForEach(LogLevel.allCases) { Text($0.title).tag($0) }
-                }
-                .labelsHidden()
-                .fixedSize()
-                if !store.device.isApple {
-                    appPickerControl
-                }
-                Toggle("只看崩溃", isOn: $store.crashesOnly)
-                    .toggleStyle(.button)
-                Spacer(minLength: 0)
+            TextField("搜索标签或内容", text: $store.query)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 180)
+            Picker("级别", selection: $store.minimum) {
+                ForEach(LogLevel.allCases) { Text($0.title).tag($0) }
             }
+            .labelsHidden()
+            .fixedSize()
+            if !store.device.isApple {
+                appPickerControl
+            }
+            Toggle("只看崩溃", isOn: $store.crashesOnly)
+                .toggleStyle(.button)
+            Spacer(minLength: 0)
             Toggle(isOn: $follow) {
                 Label("跟随最新", systemImage: "arrow.down.to.line")
                     .labelStyle(.iconOnly)
@@ -642,17 +555,24 @@ struct DeviceLogView: View {
         .padding(.vertical, 8)
     }
 
+    /// Which app's lines to show: a button that opens a searchable list
+    /// (names, full pinyin, initials or package, as in the app picker).
     private var appPickerControl: some View {
-        Picker("应用", selection: $store.appFilter) {
-            Text(theme.isAppleNative ? "全部进程" : "全部应用").tag(String?.none)
-            let list = apps.apps[store.device.id] ?? []
-            if !list.isEmpty { Divider() }
-            ForEach(list) { app in
-                Text(app.label).tag(Optional(app.package))
+        let list = apps.apps[store.device.id] ?? []
+        let current = store.appFilter.flatMap { package in list.first { $0.package == package }?.label ?? package }
+        return Button {
+            choosingApp.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Text(current ?? "全部应用").lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down").font(.caption2.weight(.semibold))
             }
+            .frame(maxWidth: 150, alignment: .leading)
         }
-        .labelsHidden()
-        .frame(maxWidth: 170)
+        .popover(isPresented: $choosingApp, arrowEdge: .bottom) {
+            LogAppFilterList(apps: list, selection: $store.appFilter) { choosingApp = false }
+        }
+        .help("只看某个应用的日志")
     }
 
     private func statusBar(count: Int) -> some View {
@@ -759,10 +679,17 @@ enum DeviceLogWindows {
         window.appearance = ThemeStore.shared.appearanceMode.nsAppearance
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: DeviceLogView(store: store))
-        // The hosting view sizes the window to its minimum; start roomier.
-        window.setContentSize(NSSize(width: 1040, height: 640))
-        window.center()
-        window.setFrameAutosaveName("DeviceLog")
+        // Roomy, but never larger than the main window, and over it.
+        let main = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true && $0.isVisible }
+        let fitted = MainWindowMetrics.fitted(CGSize(width: 1040, height: 640))
+        window.setContentSize(NSSize(width: max(600, fitted.width), height: max(360, fitted.height)))
+        if let main {
+            let size = window.frame.size
+            window.setFrameOrigin(NSPoint(x: main.frame.midX - size.width / 2,
+                                          y: main.frame.midY - size.height / 2))
+        } else {
+            window.center()
+        }
         let id = device.identity
         let observer = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
@@ -776,5 +703,76 @@ enum DeviceLogWindows {
         }
         windows[device.identity] = WindowEntry(window: window, store: store, observer: observer)
         window.makeKeyAndOrderFront(nil)
+    }
+}
+
+/// The list behind the log window's app filter: a search field (name, full
+/// pinyin, initials or package) over “全部应用” and the device's apps.
+private struct LogAppFilterList: View {
+    let apps: [DeviceApp]
+    @Binding var selection: String?
+    let done: () -> Void
+    @State private var query = ""
+    @FocusState private var focused: Bool
+
+    private var shown: [DeviceApp] {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return apps }
+        return apps.enumerated()
+            .compactMap { index, app in app.rank(for: trimmed).map { (app, $0, index) } }
+            .sorted { ($0.1, $0.2) < ($1.1, $1.2) }
+            .map(\.0)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextField("搜索名称、拼音首字母或包名", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .focused($focused)
+                .onSubmit { if let first = shown.first { pick(first.package) } }
+                .padding(10)
+            Divider()
+            List {
+                if query.isEmpty {
+                    row(title: "全部应用", package: nil)
+                }
+                ForEach(shown) { app in
+                    row(title: app.label, package: app.package)
+                }
+                if !query.isEmpty && shown.isEmpty {
+                    Text("没有匹配的应用").foregroundStyle(.secondary)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+        }
+        .frame(width: 280, height: MainWindowMetrics.fitted(CGSize(width: 280, height: 420)).height)
+        .onAppear { focused = true }
+    }
+
+    private func row(title: String, package: String?) -> some View {
+        Button { pick(package) } label: {
+            HStack {
+                Image(systemName: "checkmark")
+                    .font(.caption.weight(.semibold))
+                    .opacity(selection == package ? 1 : 0)
+                    .foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).lineLimit(1)
+                    if let package {
+                        Text(package).font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func pick(_ package: String?) {
+        selection = package
+        done()
     }
 }

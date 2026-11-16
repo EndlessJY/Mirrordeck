@@ -20,12 +20,15 @@ import java.nio.ByteBuffer;
 public final class AudioPlaybackCapture implements AudioCapture {
 
     private final boolean keepPlayingOnDevice;
+    /** Only this app's sound (it then plays nowhere else), or -1 for all. */
+    private final int uid;
 
     private AudioRecord recorder;
     private AudioRecordReader reader;
 
-    public AudioPlaybackCapture(boolean keepPlayingOnDevice) {
+    public AudioPlaybackCapture(boolean keepPlayingOnDevice, int uid) {
         this.keepPlayingOnDevice = keepPlayingOnDevice;
+        this.uid = uid;
     }
 
     @TargetApi(AndroidVersions.API_26_ANDROID_8_0)
@@ -63,10 +66,17 @@ public final class AudioPlaybackCapture implements AudioCapture {
             int ruleMatchAttributeUsageConstant = audioMixingRuleClass.getField("RULE_MATCH_ATTRIBUTE_USAGE").getInt(null);
             Method addMixRuleMethod = audioMixingRuleBuilderClass.getMethod("addMixRule", int.class, Object.class);
 
-            for (int usage : usages) {
-                AudioAttributes attributes = new AudioAttributes.Builder().setUsage(usage).build();
-                // audioMixingRuleBuilder.addMixRule(AudioMixingRule.RULE_MATCH_ATTRIBUTE_USAGE, attributes);
-                addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, attributes);
+            if (uid >= 0) {
+                // One app's sound only: its players are routed to this capture
+                // alone, so the device and other captures no longer get them.
+                int ruleMatchUidConstant = audioMixingRuleClass.getField("RULE_MATCH_UID").getInt(null);
+                addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchUidConstant, Integer.valueOf(uid));
+            } else {
+                for (int usage : usages) {
+                    AudioAttributes attributes = new AudioAttributes.Builder().setUsage(usage).build();
+                    // audioMixingRuleBuilder.addMixRule(AudioMixingRule.RULE_MATCH_ATTRIBUTE_USAGE, attributes);
+                    addMixRuleMethod.invoke(audioMixingRuleBuilder, ruleMatchAttributeUsageConstant, attributes);
+                }
             }
 
             // audioMixingRuleBuilder.voiceCommunicationCaptureAllowed(true);

@@ -38,4 +38,11 @@ sc_audio_player_init(struct sc_audio_player *ap, sc_tick target_buffering,
 void sc_audio_player_set_muted(bool muted);
 bool sc_audio_player_is_muted(void);
 
+// LANADB: a single-app window captures only its app's sound, before the
+// phone's volume applies, so its volume steps act on this window's playback
+// instead (level 0...10). True when that is the case.
+bool sc_audio_player_local_volume(void);
+// Moves the level by `delta` steps; returns the new level.
+int sc_audio_player_step_volume(int delta);
+
 #endif

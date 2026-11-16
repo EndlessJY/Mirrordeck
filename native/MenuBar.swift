@@ -223,17 +223,28 @@ enum SettingsWindow {
             existing.makeKeyAndOrderFront(nil)
             DispatchQueue.main.async { place(existing, over: bounds) }
         } else {
+            // A new window shows wherever macOS puts it, then moves into
+            // place: it stays transparent until it is there (no jump).
+            hideUntilPlaced = true
             open()
             // The window exists once SwiftUI has laid it out.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                hideUntilPlaced = false
                 if let window = NSApp.windows.first(where: {
                     $0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") == true
                 }) {
                     place(window, over: bounds)
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.12
+                        window.animator().alphaValue = 1
+                    }
                 }
             }
         }
     }
+
+    /// Set while a new settings window is being placed (see SettingsWindowHider).
+    static var hideUntilPlaced = false
 
     /// Centred horizontally over the main window, just below its top.
     private static func place(_ window: NSWindow, over bounds: NSRect) {
@@ -246,6 +257,19 @@ enum SettingsWindow {
         }
         window.setFrameOrigin(origin)
     }
+}
+
+/// Makes a new settings window transparent the moment it gets its window,
+/// before it is first drawn, while SettingsWindow.show moves it into place.
+struct SettingsWindowHider: NSViewRepresentable {
+    final class Probe: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window, SettingsWindow.hideUntilPlaced { window.alphaValue = 0 }
+        }
+    }
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ nsView: Probe, context: Context) {}
 }
 
 /// macOS frosted glass (the material of sidebars and popovers): what is
@@ -266,7 +290,54 @@ struct GlassBackground: NSViewRepresentable {
     }
 }
 
+/// The main window's content size, for panels and windows opened from it:
+/// none of them is ever larger than the main window.
+final class MainWindowMetrics: ObservableObject {
+    static let shared = MainWindowMetrics()
+    @Published var size: CGSize = .zero
+
+    /// `ideal` shrunk to fit inside the main window with a margin.
+    static func fitted(_ ideal: CGSize, margin: CGSize = CGSize(width: 48, height: 72)) -> CGSize {
+        let size = shared.size
+        guard size.width > 0, size.height > 0 else { return ideal }
+        return CGSize(width: min(ideal.width, size.width - margin.width),
+                      height: min(ideal.height, size.height - margin.height))
+    }
+}
+
+private struct SecondaryPanelSize: ViewModifier {
+    let width: CGFloat
+    let height: CGFloat?
+    @ObservedObject private var metrics = MainWindowMetrics.shared
+
+    func body(content: Content) -> some View {
+        let fitted = MainWindowMetrics.fitted(CGSize(width: width, height: height ?? .greatestFiniteMagnitude))
+        if height == nil {
+            // Its own height, but never taller than the main window allows.
+            content.frame(width: fitted.width)
+                .frame(maxHeight: fitted.height == .greatestFiniteMagnitude ? nil : fitted.height)
+        } else {
+            content.frame(width: fitted.width, height: fitted.height)
+        }
+    }
+}
+
 extension View {
+    /// A sheet's size: `width` × `height` when the main window has room,
+    /// smaller when it doesn't (it follows the main window as it resizes).
+    func secondaryPanelSize(width: CGFloat, height: CGFloat? = nil) -> some View {
+        modifier(SecondaryPanelSize(width: width, height: height))
+    }
+
+    /// Reports this view's size as the main window's.
+    func reportsMainWindowSize() -> some View {
+        background(GeometryReader { proxy in
+            Color.clear
+                .onAppear { MainWindowMetrics.shared.size = proxy.size }
+                .onChange(of: proxy.size) { _, size in MainWindowMetrics.shared.size = size }
+        })
+    }
+
     /// A sheet on light, see-through frosted glass (the iOS look) instead of
     /// the opaque window colour.
     func glassPanel() -> some View {
@@ -575,7 +646,7 @@ private struct TitleBarLeadingContent: View {
     }
 }
 
-/// Title bar controls stay out of sight on the launch screen ("正在发现设备…")
+/// Title bar controls stay out of sight on the launch screen ("幕台正在发现设备…")
 /// and fade in once the first scan has a result or has failed.
 enum TitleBarReveal {
     static var isReady: Bool { DeviceStore.shared.report != nil || DeviceStore.shared.error != nil }

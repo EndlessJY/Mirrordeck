@@ -34,10 +34,12 @@ def main():
         return
     manager = AdbLan(progress=lambda message: emit({"progress": message}))
     usb_check = str(payload.get("usb_check", "")) == "1"
+    fresh_server = str(payload.get("fresh_server", "")) == "1"
     if action == "scan":
         emit({"report": manager.scan(usb_check=usb_check)})
     elif action == "scan_fast":
-        emit({"report": manager.scan(include_subnet_scan=False, usb_check=usb_check)})
+        emit({"report": manager.scan(include_subnet_scan=False, usb_check=usb_check,
+                                     fresh_server=fresh_server)})
     elif action == "connect":
         emit({"result": manager.connect_manual(str(payload.get("endpoint", "")).strip())})
     elif action == "pair":

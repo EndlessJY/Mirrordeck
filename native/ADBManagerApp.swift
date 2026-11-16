@@ -217,6 +217,8 @@ enum Worker {
                 environment.removeValue(forKey: "ANDROID_ADB_SERVER_PORT")
                 environment["PYTHONDONTWRITEBYTECODE"] = "1"
                 environment["PYTHONUNBUFFERED"] = "1"
+                // One run of the app (see restart_server's cool-down).
+                environment["LANADB_APP_SESSION"] = "\(ProcessInfo.processInfo.processIdentifier)"
                 process.environment = environment
 
                 let input = Pipe()
@@ -463,6 +465,21 @@ final class DeviceStore: ObservableObject {
     private var pendingScan: Bool?
     private var initialSweepPending = true
     private var lastRecoverySweep = Date.distantPast
+    /// Quick retries made in a row while remembered devices can't be reached.
+    private var recoveryAttempt = 0
+    /// After launch, a network change or a dropped device, an address that
+    /// worked before is retried soon, then less often.
+    private static let recoverySteps: [TimeInterval] = [3, 6, 12, 24]
+    /// Right after launch (notably after an update) macOS is still settling
+    /// local-network access and the ADB server is new, so addresses that
+    /// can't be reached yet are not reported as problems for a while: the
+    /// launch screen stays while nothing is found, and scans repeat quickly.
+    private let launchedAt = Date()
+    private static let startupGrace: TimeInterval = 12
+    private var inStartupGrace: Bool { Date().timeIntervalSince(launchedAt) < Self.startupGrace }
+    /// The last scan, still in that grace, left out addresses it couldn't reach.
+    private var startupFailuresHidden = false
+    private var serverRefreshed = false
     /// Set by the app's launch and by every ADB device change: the next scan
     /// turns on wireless ADB for USB devices that do not have it yet.
     private var usbCheckPending = true
@@ -470,13 +487,15 @@ final class DeviceStore: ObservableObject {
     /// or periodically when the user turned that on).
     @Published private(set) var scanningNetwork = false
 
-    /// Off by default: probing every address of the network looks like a port
-    /// scan to company security tools. Devices are found without it through
+    /// Automatic scans never probe every address of the network (to company
+    /// security tools that looks like a port scan); devices are found through
     /// wireless-debugging broadcasts, USB, remembered addresses and emulators.
-    static let subnetScanKey = "discovery.subnetScan"
-    private var autoSubnet: Bool { UserDefaults.standard.bool(forKey: Self.subnetScanKey) }
+    /// Only the refresh button probes the whole subnet.
+    private let autoSubnet = false
 
     init() {
+        // The setting that turned on periodic subnet probing is gone.
+        UserDefaults.standard.removeObject(forKey: "discovery.subnetScan")
         // Show already-connected and broadcasting devices first; a second
         // pass a moment later settles macOS local-network access.
         scan(full: false)
@@ -489,6 +508,7 @@ final class DeviceStore: ObservableObject {
         monitor.onBonjourChange = { [weak self] in self?.requestScan(full: false) }
         monitor.onNetworkChange = { [weak self] in
             guard let self else { return }
+            self.recoveryAttempt = 0
             self.requestScan(full: self.autoSubnet)
         }
         self.monitor = monitor
@@ -522,6 +542,12 @@ final class DeviceStore: ObservableObject {
 
     private func scheduleFallback() {
         timer?.invalidate()
+        if inStartupGrace && (report == nil || startupFailuresHidden) {
+            timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+                self?.scan(full: false)
+            }
+            return
+        }
         let waitingIOSAuth = report?.usbIssues.contains {
             $0.state == "ios_untrusted" || $0.state == "ios_locked"
         } == true
@@ -531,8 +557,17 @@ final class DeviceStore: ObservableObject {
             }
             return
         }
-        let needsRecovery = report?.devices.isEmpty != false || report?.issues.isEmpty == false
-        timer = Timer.scheduledTimer(withTimeInterval: needsRecovery ? 45 : 90,
+        let unreachable = report?.issues.isEmpty == false
+        let needsRecovery = unreachable || report?.devices.isEmpty != false
+        let interval: TimeInterval
+        if unreachable, recoveryAttempt < Self.recoverySteps.count {
+            interval = Self.recoverySteps[recoveryAttempt]
+            recoveryAttempt += 1
+        } else {
+            if !unreachable { recoveryAttempt = 0 }
+            interval = needsRecovery ? 45 : 90
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: interval,
                                      repeats: false) { [weak self] _ in
             guard let self else { return }
             self.scan(full: self.autoSubnet)
@@ -560,8 +595,13 @@ final class DeviceStore: ObservableObject {
         if full { phase = "正在刷新设备…" }
         let usbCheck = usbCheckPending
         usbCheckPending = false
-        Worker.run(full ? "scan" : "scan_fast",
-                   payload: usbCheck ? ["usb_check": "1"] : [:]) { [weak self] result in
+        var payload: [String: String] = usbCheck ? ["usb_check": "1"] : [:]
+        if !serverRefreshed {
+            // The first scan of this run starts with a fresh ADB server.
+            serverRefreshed = true
+            payload["fresh_server"] = "1"
+        }
+        Worker.run(full ? "scan" : "scan_fast", payload: payload) { [weak self] result in
             guard let self else { return }
             self.scanning = false
             self.scanningNetwork = false
@@ -577,32 +617,44 @@ final class DeviceStore: ObservableObject {
                     let decoder = JSONDecoder()
                     decoder.keyDecodingStrategy = .convertFromSnakeCase
                     var report = try decoder.decode(ADBReport.self, from: data)
-                    if !full && self.initialSweepPending {
-                        // Right after launch (notably after an update) macOS may
-                        // still be settling local-network access, so network
-                        // failures are left to the full scan that follows.
+                    self.startupFailuresHidden = false
+                    // "No route" while the port answers is the ADB server lacking
+                    // local-network access: a recovery scan restarts it at once.
+                    let routeFailure = report.failed.contains { $0.reason.contains("无路由") }
+                    if (!full && self.initialSweepPending) || self.inStartupGrace {
+                        // Network failures right after launch are left to the
+                        // quick scans that follow (see startupGrace).
+                        let before = report.failed.count + report.usbIssues.count
                         report.failed.removeAll()
                         report.usbIssues.removeAll {
                             ["tcpip_unreachable", "no_lan_ip"].contains($0.state)
                         }
+                        self.startupFailuresHidden = report.failed.count + report.usbIssues.count < before
                     }
                     needsImmediateRecovery = !full &&
-                        Date().timeIntervalSince(self.lastRecoverySweep) > 30 &&
-                        report.failed.contains { $0.reason.contains("无路由") }
+                        Date().timeIntervalSince(self.lastRecoverySweep) > 30 && routeFailure
                     if needsImmediateRecovery {
                         // The full recovery scan runs immediately. Avoid showing
                         // its transient route failures as disconnected devices.
                         report.failed.removeAll { $0.reason.contains("无路由") }
                         self.lastRecoverySweep = Date()
                     }
-                    self.report = report
-                    let count = report.devices.count
-                    self.phase = count == 0 ? "未发现设备" : "已连接 \(count) 台设备"
-                    let valid = Set(report.devices.map { "device:" + $0.identity } +
-                                    report.issues.map { $0.id })
-                    if self.selectedID == nil || !valid.contains(self.selectedID!) {
-                        self.selectedID = report.devices.first.map { "device:" + $0.identity } ??
-                                          report.issues.first?.id
+                    // Nothing found yet while remembered addresses are still being
+                    // retried: keep the launch screen instead of an empty list.
+                    // (Right after launch a device can be found but still be
+                    // connecting, so an empty result is not trusted yet.)
+                    let holdLaunchScreen = self.report == nil && self.inStartupGrace &&
+                        report.devices.isEmpty && report.issues.isEmpty
+                    if !holdLaunchScreen {
+                        self.report = report
+                        let count = report.devices.count
+                        self.phase = count == 0 ? "未发现设备" : "已连接 \(count) 台设备"
+                        let valid = Set(report.devices.map { "device:" + $0.identity } +
+                                        report.issues.map { $0.id })
+                        if self.selectedID == nil || !valid.contains(self.selectedID!) {
+                            self.selectedID = report.devices.first.map { "device:" + $0.identity } ??
+                                              report.issues.first?.id
+                        }
                     }
                 } catch {
                     self.error = error.localizedDescription
@@ -728,7 +780,6 @@ struct SidebarSelection: ViewModifier {
                     .fill(selected ? (active ? Theme.accent : Color.primary.opacity(0.11)) :
                           hovering ? Color.primary.opacity(0.05) : Color.clear)
                     .animation(Theme.quick, value: selected)
-                    .animation(Theme.quick, value: theme.style)
             )
             .environment(\.sidebarRowHighlighted, selected && active)
             .contentShape(Rectangle())
@@ -796,7 +847,7 @@ struct DeviceSidebarRow: View {
             subtitle: live ? "投屏中 · " + device.connectionSummary : device.connectionSummary,
             status: !device.connected ? .gray : live ? Theme.accent : Theme.online,
             pulsing: live,
-            customIcon: theme.isAppleNative ? AnyView(DeviceSidebarIcon(device: device)) : nil
+            customIcon: nil
         )
         .modifier(SidebarSelection(selected: selected))
     }
@@ -808,7 +859,6 @@ struct IssueSidebarRow: View {
     @ObservedObject private var theme = ThemeStore.shared
 
     var body: some View {
-        let _ = theme.style
         SidebarRowContent(symbol: issue.symbol, tint: issue.tint,
                           title: issue.title, subtitle: issue.summary)
             .modifier(SidebarSelection(selected: selected))
@@ -1064,7 +1114,6 @@ struct DeviceDetail: View {
     @ObservedObject private var iosMirror = IOSMirrorStore.shared
     @ObservedObject private var theme = ThemeStore.shared
     @State private var pickingApp = false
-    @State private var storageCopied = false
     @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
     @AppStorage("mirror.maxFPS") private var maxFPS = 60
@@ -1138,20 +1187,9 @@ struct DeviceDetail: View {
         info.value("存储", for: device.id).flatMap(StorageOverview.parse)
     }
 
-    private var nativeSubtitle: String {
-        if device.isApple {
-            let parts = [info.value("系统", for: device.id), device.subtitle].compactMap { $0 }
-            return parts.isEmpty ? device.subtitle : parts.joined(separator: " · ")
-        }
-        let androidVer = info.value("Android", for: device.id).map { "Android \($0)" }
-        let rom = info.value("系统界面", for: device.id)
-        let parts = [androidVer, rom].compactMap { $0 }
-        return parts.isEmpty ? device.subtitle : parts.joined(separator: " · ")
-    }
-
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: theme.isAppleNative ? 20 : 26) {
+            VStack(alignment: .leading, spacing: 26) {
                 header
                 if device.isApple, let error = iosMirror.errors[device.id] {
                     Banner(text: error)
@@ -1162,18 +1200,15 @@ struct DeviceDetail: View {
                 } else if let message = mirror.messages[device.id] {
                     Banner(text: message, symbol: "record.circle", tint: Theme.recording)
                 }
-                if theme.isAppleNative {
-                    nativeTelemetryStrip
-                } else {
-                    connections
-                }
+                telemetry
                 infoSection
             }
-            .frame(maxWidth: 780, alignment: .leading)
+            // Wide windows: a wider column, centred, instead of a strip on
+            // the left and empty space on the right.
+            .frame(maxWidth: 960, alignment: .leading)
             .padding(Theme.pagePadding)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .top)
             .animation(Theme.quick, value: mirrorState)
-            .animation(Theme.quick, value: theme.style)
         }
         .sheet(isPresented: $pickingApp) {
             AppPickerView(device: device, options: mirrorOptions)
@@ -1191,51 +1226,19 @@ struct DeviceDetail: View {
     /// nothing is squeezed and the order reads as importance.
     @ViewBuilder
     private var header: some View {
-        if theme.isAppleNative {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .center, spacing: 16) {
-                    DeviceHeroIllustration(device: device)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(device.title)
-                            .font(.title2.weight(.semibold))
-                            .lineLimit(1)
-                            .textSelection(.enabled)
-                        Text(nativeSubtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        chips
-                            .padding(.top, 2)
-                    }
-                    Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .center, spacing: 16) {
+                IconTile(symbol: device.symbol, size: 64, style: .gradient)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(device.title)
+                        .font(.title2.weight(.semibold))
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                    chips
                 }
-                actionBar
+                Spacer(minLength: 0)
             }
-            .padding(18)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .fill(Theme.cardFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
-            )
-            .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
-        } else {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .center, spacing: 16) {
-                    IconTile(symbol: device.symbol, size: 64, style: .gradient)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(device.title)
-                            .font(.title2.weight(.semibold))
-                            .lineLimit(1)
-                            .textSelection(.enabled)
-                        chips
-                    }
-                    Spacer(minLength: 0)
-                }
-                actionBar
-            }
+            actionBar
         }
     }
 
@@ -1281,7 +1284,7 @@ struct DeviceDetail: View {
             Chip(text: device.connectionSummary,
                  symbol: device.connected ? "checkmark.circle.fill" : "circle.dashed",
                  tint: device.connected ? Theme.online : nil)
-            if let level = info.value("电量", for: device.id) {
+            if !showsLiveStatus, let level = info.value("电量", for: device.id) {
                 Chip(text: level, symbol: batterySymbol(level),
                      tint: info.value("状态", for: device.id) == "正在充电" ? Theme.online : nil)
             }
@@ -1319,7 +1322,6 @@ struct DeviceDetail: View {
             } label: {
                 Label("结束投屏", systemImage: "stop.fill")
             }
-            .tint(theme.isAppleNative ? Theme.recording : nil)
             .help("关闭这台设备的投屏窗口")
             .transition(.opacity)
         case .idle:
@@ -1330,7 +1332,7 @@ struct DeviceDetail: View {
                     mirror.start(device: device, options: mirrorOptions)
                 }
             } label: {
-                Label(theme.isAppleNative ? "开始投屏" : "投屏", systemImage: "play.fill")
+                Label("投屏", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.accent)
@@ -1346,165 +1348,57 @@ struct DeviceDetail: View {
         if device.isApple { iosMirror.stop(deviceID: device.id) } else { mirror.stop(deviceID: device.id) }
     }
 
-    // MARK: Connections & Apple Native Telemetry
+    // MARK: Live status & connections
 
-    @ViewBuilder
-    private var nativeTelemetryStrip: some View {
-        if let storage = storageOverview {
-            BalancedColumns(spacing: 16, rowSpacing: 16, twoColumnWidth: 560) {
-                nativeStorageCard(storage)
-                nativeConnectionsCard
+    /// The live rings are shown (and replace the same values elsewhere).
+    private var showsLiveStatus: Bool { !device.isApple && device.connected }
+
+    /// Live readings, then the connections: each a full-width card, so
+    /// nothing is left uneven beside them.
+    private var telemetry: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if showsLiveStatus {
+                LiveStatusCard(device: device, storage: storageOverview?.fraction,
+                               storageDetail: storageOverview?.remainingText)
             }
-        } else {
-            nativeConnectionsCard
+            connectionsCard
         }
     }
 
-    private func nativeStorageCard(_ storage: StorageOverview) -> some View {
-        Button {
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(storage.raw, forType: .string)
-            withAnimation(Theme.quick) { storageCopied = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                withAnimation(Theme.quick) { storageCopied = false }
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 11) {
-                HStack {
-                    Text("存储空间")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if storageCopied {
-                        Label("已复制", systemImage: "checkmark.circle.fill")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Theme.online)
-                    } else {
-                        Text(storage.summaryText)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(Color.primary.opacity(0.09))
-                        Capsule()
-                            .fill(storage.fraction > 0.9 ? Theme.recording : Theme.accent)
-                            .frame(width: max(6, geo.size.width * storage.fraction))
-                    }
-                }
-                .frame(height: 8)
-                HStack {
-                    Text(storage.remainingText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(Int((storage.fraction * 100).rounded()))% 已使用")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(15)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .fill(Theme.cardFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                    .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
-            )
-            .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("\(storage.raw)\n点按复制")
-    }
-
-    private var nativeConnectionsCard: some View {
+    private var connectionsCard: some View {
         let preferredEndpoint = MirrorStore.preferredTransports(for: device).first?.endpoint
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("连接通道")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if device.transports.count > 1 {
-                    Text("USB 在线时自动优先")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            VStack(spacing: 6) {
-                ForEach(device.transports, id: \.endpoint) { transport in
-                    let isPreferred = transport.state == "已连接" && transport.endpoint == preferredEndpoint
-                    HStack(spacing: 9) {
-                        Circle()
-                            .fill(transport.state != "已连接" ? Color.secondary.opacity(0.45) :
-                                  isPreferred ? Theme.online : Theme.accent)
-                            .frame(width: 7, height: 7)
-                        Text(transport.displayName)
-                            .font(.callout.weight(.medium))
-                            .lineLimit(1)
-                        Text(transport.endpoint)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                        Spacer(minLength: 4)
-                        if transport.state == "已连接" {
-                            Text(isPreferred ? "当前优先" : "热备")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(isPreferred ? Theme.online : .secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(
-                                    Capsule()
-                                        .fill((isPreferred ? Theme.online : Color.secondary).opacity(0.11))
-                                )
-                        } else {
-                            Text(transport.state)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Theme.subtleFill)
-                    )
-                }
-                if device.emulator {
-                    Text("同一模拟器的多个 ADB 端口已合并显示。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 2)
-                }
-            }
-        }
-        .padding(15)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                .fill(Theme.cardFill)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-                .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
-        )
-        .shadow(color: Color.black.opacity(0.03), radius: 5, y: 1.5)
-    }
-
-    private var connections: some View {
-        Card(title: "连接") {
+        return Card(title: "连接通道", accessory: device.transports.count > 1 ? AnyView(
+            Text("USB 在线时自动优先").font(.caption2).foregroundStyle(.tertiary)
+        ) : nil, prominent: true) {
             ForEach(Array(device.transports.enumerated()), id: \.element.endpoint) { index, transport in
-                if index > 0 { CardDivider(inset: 56) }
-                transportRow(transport)
+                if index > 0 { CardDivider(inset: 34) }
+                let connected = transport.state == "已连接"
+                let isPreferred = connected && transport.endpoint == preferredEndpoint
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(!connected ? Color.secondary.opacity(0.45) :
+                              isPreferred ? Theme.online : Theme.accent)
+                        .frame(width: 8, height: 8)
+                        .frame(width: 12)
+                    Text(transport.displayName)
+                        .lineLimit(1)
+                    Text(transport.endpoint)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    Spacer(minLength: 8)
+                    if connected {
+                        Chip(text: isPreferred ? "当前优先" : "热备",
+                             tint: isPreferred ? Theme.online : nil)
+                    } else {
+                        Text(transport.state).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .font(.callout)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
             }
             if device.emulator {
                 CardDivider(inset: 14)
@@ -1515,29 +1409,26 @@ struct DeviceDetail: View {
         }
     }
 
-    private func transportRow(_ transport: ADBTransport) -> some View {
-        HStack(spacing: 12) {
-            IconTile(symbol: transport.type == "USB" ? "cable.connector" :
-                        transport.type == "模拟器" ? "macwindow" : "wifi",
-                     size: 30, style: .tinted(.secondary))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(transport.displayName)
-                Text(transport.endpoint)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-    }
-
     // MARK: Device information
 
     /// The info sections plus the ADB identity when it differs from the serial.
     private var displaySections: [DeviceInfoSection] {
         var sections = info.sections[device.id] ?? []
+        if showsLiveStatus {
+            // Shown live in the rings above.
+            sections = sections.compactMap { section in
+                let items = section.items.filter { item in
+                    !(section.title == "电池" && ["电量", "状态", "温度"].contains(item.label))
+                        && item.label != "存储"
+                }.map { item -> DeviceInfoSection.Item in
+                    // "11.0 GB（可用 6.0 GB）": what is free is live above.
+                    guard item.label == "内存", let cut = item.value.firstIndex(of: "（") else { return item }
+                    return DeviceInfoSection.Item(label: item.label,
+                                                  value: String(item.value[..<cut]).trimmingCharacters(in: .whitespaces))
+                }
+                return items.isEmpty ? nil : DeviceInfoSection(title: section.title, items: items)
+            }
+        }
         if !device.isApple, !sections.isEmpty, info.value("序列号", for: device.id) != device.identity {
             sections.append(DeviceInfoSection(title: "识别",
                                               items: [.init(label: "ADB 标识", value: device.identity)]))
@@ -1548,13 +1439,8 @@ struct DeviceDetail: View {
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text(theme.isAppleNative ? "硬件与系统规格" : "设备信息")
+                Text("设备信息")
                     .font(.headline)
-                if theme.isAppleNative {
-                    Text("点按任意行复制")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
                 Spacer()
                 if info.fullLoading.contains(device.id) {
                     ProgressView().controlSize(.small)
@@ -1570,16 +1456,21 @@ struct DeviceDetail: View {
                 }
             }
             let sections = displaySections
-            if sections.isEmpty {
+            if sections.isEmpty, let error = info.errors[device.id] {
                 Card {
-                    HStack(spacing: 8) {
-                        if info.errors[device.id] == nil { ProgressView().controlSize(.small) }
-                        Text(info.errors[device.id] ?? "正在读取设备信息…")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.callout)
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(error)
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if sections.isEmpty {
+                // The shape of what is coming, until it comes.
+                BalancedColumns(spacing: 16, rowSpacing: 18, twoColumnWidth: 560) {
+                    SkeletonCard(rows: 5)
+                    SkeletonCard(rows: 6)
+                    SkeletonCard(rows: 4)
+                    SkeletonCard(rows: 3)
                 }
             } else {
                 // Two columns when there is room keep the list short. The
@@ -1625,12 +1516,6 @@ struct InfoRow: View {
                 ZStack(alignment: .trailing) {
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
                         value
-                        if theme.isAppleNative {
-                            Image(systemName: "doc.on.doc")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .opacity(hovering ? 1 : 0)
-                        }
                     }
                     .opacity(copied ? 0 : 1)
                     if copied {
@@ -1647,7 +1532,7 @@ struct InfoRow: View {
             .contentShape(Rectangle())
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.primary.opacity(hovering ? (theme.isAppleNative ? 0.035 : 0.05) : 0))
+                    .fill(Color.primary.opacity(hovering ? 0.05 : 0))
                     .padding(.horizontal, 4)
             )
         }
@@ -1657,11 +1542,9 @@ struct InfoRow: View {
         .accessibilityAction(named: "拷贝") { copy() }
         .onHover { inside in
             hovering = inside
-            if !theme.isAppleNative {
-                // set(), not push()/pop(): a row removed while hovered never gets
-                // its exit call, and an unbalanced push left the hand everywhere.
-                (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
-            }
+            // set(), not push()/pop(): a row removed while hovered never gets
+            // its exit call, and an unbalanced push left the hand everywhere.
+            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
         .animation(Theme.quick, value: copied)
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -1704,7 +1587,6 @@ struct MirrorSettingsView: View {
     @AppStorage(RecordingSettings.audioKey) private var recordAudio = true
     @AppStorage(RecordingSettings.gifQualityKey) private var gifQuality = "standard"
     @AppStorage(RecordingSettings.animatedFormatKey) private var animatedFormat = "webp"
-    @AppStorage(DeviceStore.subnetScanKey) private var subnetScan = false
     @AppStorage(PhoneSettings.stayAwakeKey) private var stayAwake = true
     @AppStorage(PhoneSettings.lockOnCloseKey) private var lockOnClose = false
     @AppStorage(PhoneSettings.quietRecordingKey) private var quietRecording = true
@@ -1731,19 +1613,23 @@ struct MirrorSettingsView: View {
 
     var body: some View {
         TabView {
-            // App-wide: menu bar, finding devices, updates.
+            // App-wide: appearance, menu bar, finding devices, updates.
             Form {
+                Section {
+                    Picker("外观", selection: $theme.appearanceMode) {
+                        ForEach(AppAppearanceMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("外观")
+                }
                 Section {
                     Toggle("在菜单栏显示幕台", isOn: $showMenuBar)
                         .help("从菜单栏直接投屏、截图、打开日志；关闭主窗口后幕台仍在菜单栏运行")
                 } header: {
                     Text("菜单栏")
-                }
-                Section {
-                    Toggle("定时刷新设备", isOn: $subnetScan)
-                        .help("定时更新时也探测本网段各地址的 ADB 端口，用于找到只开了 adb tcpip、既没有广播也没连接过的设备。企业内网建议保持关闭")
-                } header: {
-                    Text("发现设备")
                 }
                 Section {
                     LabeledContent("当前版本", value: UpdateChecker.isLocalBuild ?
@@ -1780,18 +1666,9 @@ struct MirrorSettingsView: View {
                         Text("2560 像素").tag(2560)
                         Text("设备原始分辨率").tag(0)
                     }
-                    if theme.isAppleNative {
-                        Picker("最高帧率", selection: $maxFPS) {
-                            ForEach([30, 45, 60, 90, 120], id: \.self) { value in
-                                Text("\(value)").tag(value)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                    } else {
-                        Picker("最高帧率", selection: $maxFPS) {
-                            ForEach([30, 45, 60, 90, 120], id: \.self) { value in
-                                Text("\(value) FPS").tag(value)
-                            }
+                    Picker("最高帧率", selection: $maxFPS) {
+                        ForEach([30, 45, 60, 90, 120], id: \.self) { value in
+                            Text("\(value) FPS").tag(value)
                         }
                     }
                     Picker("视频码率", selection: $videoBitrateMbps) {
@@ -1864,17 +1741,9 @@ struct MirrorSettingsView: View {
                     Text("录屏")
                 }
                 Section {
-                    if theme.isAppleNative {
-                        Picker("格式", selection: $animatedFormat) {
-                            Text("WebP（体积更小）").tag("webp")
-                            Text("GIF（兼容通用）").tag("gif")
-                        }
-                        .pickerStyle(.segmented)
-                    } else {
-                        Picker("格式", selection: $animatedFormat) {
-                            Text("GIF（兼容性最好）").tag("gif")
-                            Text("WebP（体积约为 GIF 的 1/3，画质更好）").tag("webp")
-                        }
+                    Picker("格式", selection: $animatedFormat) {
+                        Text("GIF（兼容性最好）").tag("gif")
+                        Text("WebP（体积约为 GIF 的 1/3，画质更好）").tag("webp")
                     }
                     Picker("画质", selection: $gifQuality) {
                         Text("高（最长边 1280 像素 · 15 帧/秒）").tag("high")
@@ -1894,38 +1763,6 @@ struct MirrorSettingsView: View {
             .formStyle(.grouped)
             .frame(height: layout.pageHeight(560))
             .tabItem { Label("录制", systemImage: "record.circle") }
-
-            Form {
-                Section {
-                    HStack(spacing: 12) {
-                        ForEach(AppThemeStyle.allCases) { option in
-                            ThemeStyleOptionCard(
-                                option: option,
-                                selected: theme.style == option
-                            ) {
-                                withAnimation(Theme.quick) {
-                                    theme.style = option
-                                }
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                } header: {
-                    Text("界面主题")
-                }
-
-                Section("深浅外观") {
-                    Picker("外观模式", selection: $theme.appearanceMode) {
-                        ForEach(AppAppearanceMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-            }
-            .formStyle(.grouped)
-            .frame(height: layout.pageHeight(380))
-            .tabItem { Label("外观", systemImage: "paintbrush") }
         }
         // Option values in the normal text colour, switches in the brand colour.
         .tint(.primary)
@@ -1934,106 +1771,7 @@ struct MirrorSettingsView: View {
         // Frosted glass behind every page; the forms drop their opaque fill.
         .scrollContentBackground(.hidden)
         .glassWindow()
-    }
-}
-
-private struct ThemeStyleOptionCard: View {
-    let option: AppThemeStyle
-    let selected: Bool
-    let action: () -> Void
-
-    private var optionAccent: Color {
-        option == .appleNative ? Color(nsColor: .systemBlue) : Color(nsColor: .systemIndigo)
-    }
-
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                // Visual miniature preview of the theme's signature header & palette
-                HStack(spacing: 10) {
-                    if option == .classic {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color(nsColor: .systemIndigo), Color(nsColor: .systemPurple)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 30, height: 30)
-                            .overlay(
-                                Image(systemName: "smartphone")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(.white)
-                            )
-                    } else {
-                        ZStack(alignment: .top) {
-                            RoundedRectangle(cornerRadius: 4.5, style: .continuous)
-                                .fill(Color(nsColor: .systemBlue).opacity(0.10))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4.5, style: .continuous)
-                                        .strokeBorder(Color.primary.opacity(0.65), lineWidth: 1.3)
-                                )
-                            Capsule()
-                                .fill(Color.primary.opacity(0.75))
-                                .frame(width: 6, height: 1.5)
-                                .padding(.top, 3)
-                        }
-                        .frame(width: 19, height: 30)
-                        .padding(.horizontal, 5.5)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        RoundedRectangle(cornerRadius: 2.5)
-                            .fill(Color.primary.opacity(0.75))
-                            .frame(width: 72, height: 6)
-                        HStack(spacing: 4) {
-                            Capsule()
-                                .fill(Color(nsColor: .systemGreen).opacity(0.22))
-                                .frame(width: 32, height: 6)
-                            Capsule()
-                                .fill(optionAccent.opacity(0.22))
-                                .frame(width: 26, height: 6)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    Capsule()
-                        .fill(optionAccent)
-                        .frame(width: 28, height: 14)
-                }
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.primary.opacity(0.04))
-                )
-
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selected ? optionAccent : .secondary)
-                    Text(option.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                }
-                Text(option.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(selected ? optionAccent.opacity(0.07) : Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(
-                        selected ? optionAccent : Color(nsColor: .separatorColor).opacity(0.6),
-                        lineWidth: selected ? 1.6 : 0.7
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        .background(SettingsWindowHider().frame(width: 0, height: 0))
     }
 }
 
@@ -2045,7 +1783,6 @@ struct IssueDetail: View {
     @ObservedObject private var theme = ThemeStore.shared
 
     var body: some View {
-        let _ = theme.style
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 16) {
@@ -2221,7 +1958,7 @@ struct ActionSheetView: View {
         .onChange(of: endpoint) { message = "" }
         .onChange(of: code) { if !code.isEmpty { message = "" } }
         .padding(25)
-        .frame(width: 430, height: mode == .pair ? 275 : 240)
+        .secondaryPanelSize(width: 430, height: mode == .pair ? 275 : 240)
         .onAppear { endpoint = suggestedEndpoint }
     }
 }
@@ -2275,7 +2012,7 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     IconTile(symbol: "dot.radiowaves.left.and.right", size: 64, style: .gradient)
                         .symbolEffect(.variableColor.iterative, options: .repeating)
-                    Text("正在发现设备…").font(.title3.weight(.medium))
+                    Text("幕台正在发现设备…").font(.title3.weight(.medium))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -2304,6 +2041,7 @@ struct ContentView: View {
             }
             .tint(Theme.accent)
             .frame(minWidth: 720, minHeight: 500)
+            .reportsMainWindowSize()
             // No toolbar band (and no line under it) across the top of the
             // main area.
             .hiddenToolbarBackground()
@@ -2345,7 +2083,7 @@ struct SidebarColumn: View {
                                 .listRowBackground(Color.clear)
                         }
                     } header: {
-                        SidebarHeader(title: theme.isAppleNative ? "已连接设备" : "设备",
+                        SidebarHeader(title: "设备",
                                       count: report.devices.count,
                                       searching: !store.initialSweepDone)
                     }
@@ -2496,6 +2234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        LiveStatsRegistry.shared.stopAll()
         PhoneQuiet.endAll()
         MirrorStore.shared.stopAll()
         IOSMirrorStore.shared.stopAll()

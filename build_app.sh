@@ -34,6 +34,17 @@ if [[ ! -d build/custom-scrcpy ]]; then
 fi
 /opt/homebrew/bin/ninja -C build/custom-scrcpy
 
+# The device-side server is built from our source too (single-app windows
+# capture only their app's sound), with the newest Android SDK at hand.
+sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+platform=$(/bin/ls "$sdk/platforms" 2>/dev/null | /usr/bin/sed -n 's/^android-\([0-9]*\)$/\1/p' | /usr/bin/sort -n | /usr/bin/tail -1)
+build_tools=$(/bin/ls "$sdk/build-tools" 2>/dev/null | /usr/bin/sort -V | /usr/bin/tail -1)
+[[ -n "$platform" && -n "$build_tools" ]] || { echo "缺少 Android SDK（platforms 与 build-tools），无法构建设备端组件" >&2; exit 1; }
+mkdir -p build/scrcpy-server
+ANDROID_HOME="$sdk" ANDROID_PLATFORM="$platform" ANDROID_BUILD_TOOLS="$build_tools" \
+  BUILD_DIR="$PWD/build/scrcpy-server" vendor/scrcpy-source/server/build_without_gradle.sh > build/scrcpy-server.log 2>&1 || {
+  /usr/bin/tail -20 build/scrcpy-server.log >&2; echo "设备端组件构建失败" >&2; exit 1; }
+
 if [[ ! -x build/venv/bin/pyinstaller ]]; then
   "$python" -m venv build/venv
   build/venv/bin/python -m pip install --disable-pip-version-check 'pyinstaller==6.22.3'
@@ -65,7 +76,7 @@ webp=/opt/homebrew/opt/webp
   native/GIFConverter.swift native/WebPConverter.swift \
   native/AppWindows.swift native/AppPicker.swift native/DeviceLogs.swift \
   native/IOSDevices.swift native/IOSMirror.swift \
-  native/DevicePrefs.swift native/CaptureHistory.swift native/UpdateChecker.swift native/MenuBar.swift
+  native/DevicePrefs.swift native/CaptureHistory.swift native/UpdateChecker.swift native/MenuBar.swift native/LiveStats.swift
 /bin/cp native/Info.plist "$app/Contents/Info.plist"
 # Reads app icons on the device for the app picker (run, then deleted there).
 /bin/cp android/icons/lanadb-icons.dex "$app/Contents/Resources/lanadb-icons.dex"
@@ -82,6 +93,7 @@ fi
 mkdir -p "$app/Contents/Resources/Tools"
 /usr/bin/tar -xf "$archive" -C "$app/Contents/Resources/Tools" --strip-components=1
 /bin/rm "$app/Contents/Resources/Tools/scrcpy"
+/bin/cp build/scrcpy-server/scrcpy-server "$app/Contents/Resources/Tools/scrcpy-server"
 mirror="$app/Contents/Helpers/LANADBMirror.app"
 /bin/mkdir -p "$mirror/Contents/MacOS"
 /bin/cp native/MirrorInfo.plist "$mirror/Contents/Info.plist"

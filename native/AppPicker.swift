@@ -5,7 +5,6 @@ struct AppPickerView: View {
     let device: ADBDevice
     let options: MirrorOptions
     @ObservedObject private var store = AppWindowStore.shared
-    @ObservedObject private var theme = ThemeStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var selection: String?
@@ -31,22 +30,18 @@ struct AppPickerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if theme.isAppleNative {
-                nativeHeader
-            } else {
-                classicHeader
-            }
+            header
             Divider()
             content
             Divider()
             footer
         }
         .tint(Theme.accent)
-        .frame(width: theme.isAppleNative ? 500 : 460, height: 540)
+        .secondaryPanelSize(width: 480, height: 560)
         .onAppear { store.load(device) }
     }
 
-    private var classicHeader: some View {
+    private var header: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 IconTile(symbol: "macwindow.on.rectangle", size: 30, style: .tinted(Theme.accent))
@@ -65,39 +60,6 @@ struct AppPickerView: View {
         }
     }
 
-    private var nativeHeader: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField("搜索应用名称、拼音首字母或包名…", text: $query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14))
-                .onSubmit { openSelected() }
-            if !query.isEmpty {
-                Button {
-                    query = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-            }
-            reloadButton
-            Text("ESC")
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .strokeBorder(Theme.cardStroke, lineWidth: 0.6)
-                )
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-
     private var reloadButton: some View {
         Button {
             store.load(device, reload: true)
@@ -114,33 +76,40 @@ struct AppPickerView: View {
             if let error = store.errors[device.id] {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout).foregroundStyle(.orange).lineLimit(2)
-            } else if theme.isAppleNative {
-                Text("独立虚拟屏幕运行，不打断手机当前界面")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
             Spacer()
             Button("取消") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button(theme.isAppleNative ? "独立窗口打开" : "打开") { openSelected() }
+            Button("打开") { openSelected() }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accent)
                 .disabled(target == nil)
         }
         .padding(14)
-        .background(theme.isAppleNative ? Theme.subtleFill : Color.clear)
     }
 
     @ViewBuilder
     private var content: some View {
         if apps.isEmpty && store.loading.contains(device.id) {
-            VStack(spacing: 10) {
-                ProgressView().controlSize(.small)
-                Text("正在读取应用…").font(.callout).foregroundStyle(.secondary)
+            // Skeleton rows in the shape of the list, until it is read.
+            VStack(alignment: .leading, spacing: 0) {
+                SkeletonBlock(width: 40, height: 11).padding(.bottom, 10)
+                ForEach(0..<8, id: \.self) { index in
+                    HStack(spacing: 10) {
+                        SkeletonBlock(width: 28, height: 28, radius: 7)
+                        VStack(alignment: .leading, spacing: 5) {
+                            SkeletonBlock(width: CGFloat([90, 120, 70, 110][index % 4]), height: 11)
+                            SkeletonBlock(width: CGFloat([150, 180, 130, 170][index % 4]), height: 9)
+                        }
+                    }
+                    .padding(.vertical, 7)
+                }
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else if filtered.isEmpty {
             Text(apps.isEmpty ? "没有读取到应用" : "没有匹配的应用")
                 .font(.callout).foregroundStyle(.secondary)
@@ -148,28 +117,34 @@ struct AppPickerView: View {
         } else {
             VStack(spacing: 0) {
                 let recents = searching ? [] : recentApps
-                let stripRecents = theme.isAppleNative ? Array(recents.prefix(5)) : []
-                if !stripRecents.isEmpty {
-                    nativeRecentsStrip(stripRecents)
-                    Divider()
-                }
+                let stripRecents = Array(recents.prefix(8))
                 List(selection: $selection) {
-                    let shown = Set((theme.isAppleNative ? stripRecents : recents).map(\.package))
+                    // Group titles are plain rows, not section headers: a header
+                    // reaching the top would float on a bar, and look unlike
+                    // the others.
+                    if !stripRecents.isEmpty {
+                        groupTitle("最近", first: true)
+                        recentsStrip(stripRecents)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 6, trailing: 0))
+                            .listRowSeparator(.hidden)
+                            .selectionDisabled()
+                    }
+                    let shown = Set(stripRecents.map(\.package))
                     let rest = filtered.filter { !shown.contains($0.package) }
                     if searching {
                         // One list in match order: best matches on top.
-                        Section("搜索结果") { ForEach(rest) { row($0) } }
+                        groupTitle("搜索结果", first: true)
+                        ForEach(rest) { row($0) }
                     }
                     let installed = searching ? [] : rest.filter { !$0.system }
                     let system = searching ? [] : rest.filter(\.system)
-                    if !theme.isAppleNative && !recents.isEmpty {
-                        Section("最近") { ForEach(recents) { row($0) } }
-                    }
                     if !installed.isEmpty {
-                        Section("已安装") { ForEach(installed) { row($0) } }
+                        groupTitle("已安装", first: stripRecents.isEmpty)
+                        ForEach(installed) { row($0) }
                     }
                     if !system.isEmpty {
-                        Section("系统应用") { ForEach(system) { row($0) } }
+                        groupTitle("系统应用", first: stripRecents.isEmpty && installed.isEmpty)
+                        ForEach(system) { row($0) }
                     }
                 }
                 .listStyle(.inset)
@@ -185,57 +160,65 @@ struct AppPickerView: View {
         }
     }
 
-    private func nativeRecentsStrip(_ recents: [DeviceApp]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("最近打开")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
+    /// A group's title, as a row of its own (see the list above).
+    private func groupTitle(_ text: String, first: Bool) -> some View {
+        Text(text)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, first ? 4 : 14)
+            .padding(.bottom, 2)
+            .listRowSeparator(.hidden)
+            .selectionDisabled()
+    }
+
+    /// Recently opened apps as a row of larger icons, newest first; it
+    /// scrolls sideways when they don't all fit.
+    private func recentsStrip(_ recents: [DeviceApp]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
                 ForEach(recents) { app in
-                    let isSelected = selection == app.package
-                    VStack(spacing: 5) {
-                        appIcon(for: app, size: 38, radius: 9)
-                            .overlay(alignment: .topTrailing) {
-                                if store.open[device.id]?.contains(app.package) == true {
-                                    Circle()
-                                        .fill(Theme.online)
-                                        .frame(width: 7, height: 7)
-                                        .overlay(Circle().strokeBorder(Color.white, lineWidth: 1))
-                                        .offset(x: 2, y: -2)
-                                }
-                            }
-                        Text(app.label)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .foregroundStyle(isSelected ? Theme.accent : .primary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(isSelected ? Theme.accent.opacity(0.12) : Color.clear)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(isSelected ? Theme.accent.opacity(0.45) : Color.clear, lineWidth: 1)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        selection = app.package
-                        openSelected()
-                    }
-                    .simultaneousGesture(
-                        TapGesture(count: 1).onEnded {
-                            selection = app.package
-                        }
-                    )
-                    .help("\(app.label)（双击直接打开）")
+                    recentTile(app)
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+    }
+
+    private func recentTile(_ app: DeviceApp) -> some View {
+        let isSelected = selection == app.package
+        return VStack(spacing: 6) {
+            appIcon(for: app, size: 46, radius: 11)
+                .overlay(alignment: .topTrailing) {
+                    if store.open[device.id]?.contains(app.package) == true {
+                        Circle()
+                            .fill(Theme.online)
+                            .frame(width: 8, height: 8)
+                            .overlay(Circle().strokeBorder(Color.white, lineWidth: 1))
+                            .offset(x: 2, y: -2)
+                    }
+                }
+            Text(app.label)
+                .font(.caption)
+                .lineLimit(1)
+                .foregroundStyle(isSelected ? Theme.accent : .primary)
+        }
+        .frame(width: 68)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isSelected ? Theme.accent.opacity(0.12) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(isSelected ? Theme.accent.opacity(0.45) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            selection = app.package
+            openSelected()
+        }
+        .simultaneousGesture(TapGesture(count: 1).onEnded { selection = app.package })
+        .help("\(app.label)（双击直接打开）")
     }
 
     @ViewBuilder

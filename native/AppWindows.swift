@@ -112,7 +112,7 @@ final class AppWindowStore: ObservableObject {
         environment["LANADB_ARROW_SWIPE"] = MirrorStore.arrowSwipe ? "1" : "0"
         environment["LANADB_RECORDING"] = "0"
         environment["LANADB_GAMUT"] = "srgb"
-        environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
+        environment["LANADB_THEME"] = "classic"
         environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
         environment["SCRCPY_SERVER_PATH"] = tools.appendingPathComponent("scrcpy-server").path
         environment["SCRCPY_ICON_DIR"] = tools.path
@@ -157,9 +157,70 @@ final class AppWindowStore: ObservableObject {
 
     /// Reads the device's apps and their icons (a second or two); kept until
     /// `reload`.
+    /// Devices whose list was read from the device in this run (a cached one
+    /// shows at once, and is checked against the device once).
+    private var refreshed = Set<String>()
+
+    /// The last list and icons of each device, kept on disk so the picker
+    /// shows them at once, even right after launch.
+    private struct Cache: Codable {
+        struct App: Codable { let label: String; let package: String; let system: Bool }
+        var apps: [App]
+        var icons: [String: Data]
+    }
+
+    private static func cacheURL(_ id: String) -> URL {
+        let name = Data(id.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-")
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/LAN ADB Manager/AppCache", isDirectory: true)
+            .appendingPathComponent(name + ".plist")
+    }
+
+    private func restoreCache(_ id: String) {
+        guard apps[id] == nil,
+              let data = try? Data(contentsOf: Self.cacheURL(id)),
+              let cache = try? PropertyListDecoder().decode(Cache.self, from: data),
+              !cache.apps.isEmpty else { return }
+        apps[id] = cache.apps.map { DeviceApp(label: $0.label, package: $0.package, system: $0.system) }
+        iconData[id] = cache.icons
+        icons[id] = cache.icons.compactMapValues { NSImage(data: $0) }
+    }
+
+    private func saveCache(_ id: String) {
+        guard let list = apps[id] else { return }
+        let cache = Cache(apps: list.map { .init(label: $0.label, package: $0.package, system: $0.system) },
+                          icons: iconData[id] ?? [:])
+        let url = Self.cacheURL(id)
+        DispatchQueue.global(qos: .utility).async {
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            guard let data = try? encoder.encode(cache) else { return }
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// An app's name from the list read before (or cached), if known.
+    func label(for package: String, on device: ADBDevice) -> String? {
+        let id = device.identity
+        guard let list = apps[id] else {
+            // Not while a view is being drawn: the cached list, or the
+            // device's own (with icons) when there is none, loads just after.
+            DispatchQueue.main.async {
+                self.restoreCache(id)
+                if self.apps[id] == nil { self.load(device) }
+            }
+            return nil
+        }
+        return list.first { $0.package == package }?.label
+    }
+
     func load(_ device: ADBDevice, reload: Bool = false) {
         let id = device.identity
-        guard !device.isApple, !loading.contains(id), reload || apps[id] == nil,
+        restoreCache(id)
+        guard !device.isApple, !loading.contains(id), reload || !refreshed.contains(id),
               let serial = MirrorStore.preferredTransports(for: device).first?.endpoint,
               let tools else { return }
         let preserveRunning = MirrorStore.shared.hasRunningSession(for: device)
@@ -185,26 +246,37 @@ final class AppWindowStore: ObservableObject {
                 guard let self else { return }
                 if parsed.isEmpty {
                     self.loading.remove(id)
-                    self.errors[id] = "无法读取应用列表，请确认设备已连接。"
+                    // A cached list stays; only with none is it an error.
+                    if self.apps[id] == nil { self.errors[id] = "无法读取应用列表，请确认设备已连接。" }
                     return
                 }
+                self.refreshed.insert(id)
                 self.apps[id] = parsed
             }
+            guard !parsed.isEmpty else { return }
             let adb = tools.appendingPathComponent("adb")
-            var pictures = Self.readIcons(serial: serial, packages: parsed.map(\.package), adb: adb)
+            // Icons already cached are not read again (a reload reads them all).
+            let known = DispatchQueue.main.sync { reload ? [:] : (self?.iconData[id] ?? [:]) }
+            let wanted = parsed.map(\.package).filter { known[$0] == nil }
+            var pictures = Self.readIcons(serial: serial, packages: wanted, adb: adb)
             // An icon can fail once (the app was busy starting, say): ask again
             // for just those.
-            let missing = parsed.map(\.package).filter { pictures[$0] == nil }
-            if !missing.isEmpty && missing.count < parsed.count {
+            let missing = wanted.filter { pictures[$0] == nil }
+            if !missing.isEmpty && missing.count < wanted.count {
                 pictures.merge(Self.readIcons(serial: serial, packages: missing, adb: adb)) { a, _ in a }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.loading.remove(id)
                 // A reload never loses an icon read before.
+                let installed = Set(parsed.map(\.package))
                 let merged = (self.iconData[id] ?? [:]).merging(pictures) { _, new in new }
+                    .filter { installed.contains($0.key) }
                 self.iconData[id] = merged
-                self.icons[id] = merged.compactMapValues { NSImage(data: $0) }
+                if !pictures.isEmpty || self.icons[id]?.count != merged.count {
+                    self.icons[id] = merged.compactMapValues { NSImage(data: $0) }
+                }
+                self.saveCache(id)
             }
         }
     }
@@ -282,6 +354,11 @@ final class AppWindowStore: ObservableObject {
                 for: device, preserveRunningBundle: preserveRunning) }
             let before = Set(Self.displays(in: Self.run(adb, ["-s", transport.endpoint, "shell",
                 Self.activitiesCommand], timeout: 6)))
+            // The app's uid, so the window captures only its sound.
+            let uid = Self.uid(of: app.package, in: Self.run(adb, ["-s", transport.endpoint, "shell",
+                "pm list packages -U \(app.package)"], timeout: 6))
+            let sdk = Int(Self.run(adb, ["-s", transport.endpoint, "shell", "getprop ro.build.version.sdk"],
+                                   timeout: 6).trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             DispatchQueue.main.async {
                 guard let self else { return }
                 guard self.starting.remove(key) != nil else { return }
@@ -295,14 +372,15 @@ final class AppWindowStore: ObservableObject {
                     return
                 }
                 self.launchWindow(for: app, on: device, transport: transport, options: options,
-                                  tools: tools, executable: executable, existingDisplays: before)
+                                  tools: tools, executable: executable, existingDisplays: before,
+                                  appUID: sdk >= 33 ? uid : nil)
             }
         }
     }
 
     private func launchWindow(for app: DeviceApp, on device: ADBDevice, transport: ADBTransport,
                               options: MirrorOptions, tools: URL, executable: URL,
-                              existingDisplays: Set<Int>) {
+                              existingDisplays: Set<Int>, appUID: Int?) {
         let id = device.identity
         let key = key(device, app.package)
         let title = "\(app.label) · \(device.title)"
@@ -314,9 +392,9 @@ final class AppWindowStore: ObservableObject {
             "--serial=\(transport.endpoint)",
             "--window-title=\(title)",
             // A display of the phone's size and density, so the app lays out
-            // as it does on the phone; closing the window moves the app back
-            // to the phone instead of ending it.
-            "--new-display", "--no-vd-destroy-content",
+            // as it does on the phone. Closing the window closes the app with
+            // it: it never turns up on the phone's own screen (or its mirror).
+            "--new-display",
             // The keyboard shows inside this window, on the app's own display,
             // not on the phone's screen.
             "--display-ime-policy=local",
@@ -332,15 +410,28 @@ final class AppWindowStore: ObservableObject {
         // Where this app's window was last left on this device.
         arguments += WindowPlaces.arguments(key)
         // AAC allows single-app MP4 recordings to mux live audio playable in chat apps.
-        // While the main mirror carries the device's sound (this app's included),
-        // the window does not capture it again: see mainMirrorCapturesAudio.
-        let audio = options.audio && !MirrorStore.shared.mainMirrorCapturesAudio(for: device)
+        // Android 13+: the window captures only its app's sound, which then
+        // plays nowhere else (not on the phone, not in the main mirror), so
+        // the two stay independent. Before that, sound is device-wide: the
+        // window leaves it to a main mirror that carries it.
+        let audio: Bool
+        var ownAudio = false
+        if options.audio, let appUID {
+            audio = true
+            ownAudio = true
+            arguments += ["--audio-source=playback", "--audio-uid=\(appUID)"]
+        } else {
+            audio = options.audio && !MirrorStore.shared.mainMirrorCapturesAudio(for: device)
+        }
         arguments.append(audio ? "--audio-codec=aac" : "--no-audio")
         process.arguments = arguments
         let token = UUID().uuidString
         var environment = environment(serial: transport.endpoint, tools: tools)
         environment["LANADB_SESSION_TOKEN"] = token
         environment["LANADB_AUDIO_ENABLED"] = audio ? "1" : "0"
+        // Its sound is taken before the phone's volume applies: the window's
+        // volume buttons and keys then set this window's own volume.
+        environment["LANADB_APP_OWN_AUDIO"] = ownAudio ? "1" : "0"
         environment["LANADB_APP_LABEL"] = app.label
         if let data = iconData[id]?[app.package] {
             let icon = FileManager.default.temporaryDirectory
@@ -416,6 +507,18 @@ final class AppWindowStore: ObservableObject {
 
     private static func isActivityEntry(_ text: String) -> Bool {
         text.range(of: #"Hist +#[0-9]+:"#, options: .regularExpression) != nil
+    }
+
+    /// The uid in `pm list packages -U <package>` ("package:<name> uid:<n>").
+    static func uid(of package: String, in output: String) -> Int? {
+        for line in output.split(separator: "\n") {
+            let fields = line.split(separator: " ")
+            guard fields.first == "package:\(package)" else { continue }
+            for field in fields where field.hasPrefix("uid:") {
+                return Int(field.dropFirst(4).split(separator: ",").first ?? "")
+            }
+        }
+        return nil
     }
 
     static func displays(in output: String) -> [Int] {

@@ -105,7 +105,7 @@ struct CaptureHistoryView: View {
             }
         }
         .padding(14)
-        .frame(width: 460)
+        .secondaryPanelSize(width: 460)
         .onAppear { history.prune() }
     }
 }

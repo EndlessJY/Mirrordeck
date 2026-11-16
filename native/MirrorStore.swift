@@ -826,7 +826,7 @@ final class MirrorStore: ObservableObject {
             environment["LANADB_SHORTCUT_TIP"] = "1"
         }
         environment["LANADB_GAMUT"] = "srgb"
-        environment["LANADB_THEME"] = ThemeStore.shared.style.rawValue
+        environment["LANADB_THEME"] = "classic"
         environment["LANADB_APPEARANCE"] = ThemeStore.shared.appearanceMode.rawValue
         environment["SCRCPY_SERVER_PATH"] = server.path
         environment["SCRCPY_ICON_DIR"] = tools.path

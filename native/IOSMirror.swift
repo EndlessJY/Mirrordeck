@@ -1062,7 +1062,6 @@ private struct IOSToolButton<Label: View>: View {
     @State private var hovered = false
 
     var body: some View {
-        let _ = theme.style
         let tint: Color = !enabled ? Color.secondary.opacity(0.45) :
             (recording ? .red : (active ? Theme.accent : Color.primary.opacity(0.8)))
         let fill: Color = !enabled ? .clear :
