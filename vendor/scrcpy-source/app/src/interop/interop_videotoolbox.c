@@ -97,8 +97,20 @@ sc_interop_videotoolbox_import(struct sc_interop *interop,
                      || interop->frame_size.width != size.width
                      || interop->frame_size.height != size.height;
 
+    // LANADB: keep the last explicit colour space/range across frames so
+    // frames with unspecified metadata do not cause sudden contrast/colour shifts.
+    if (frame->colorspace != AVCOL_SPC_UNSPECIFIED) {
+        vt->color_space = frame->colorspace;
+    }
+    if (frame->color_range != AVCOL_RANGE_UNSPECIFIED) {
+        vt->color_range = frame->color_range;
+    }
+    enum AVColorSpace eff_space = frame->colorspace != AVCOL_SPC_UNSPECIFIED
+                                ? frame->colorspace : vt->color_space;
+    enum AVColorRange eff_range = frame->color_range != AVCOL_RANGE_UNSPECIFIED
+                                ? frame->color_range : vt->color_range;
     SDL_Colorspace colorspace =
-        sc_interop_to_sdl_color_space(frame->colorspace, frame->color_range);
+        sc_interop_to_sdl_color_space(eff_space, eff_range);
     SDL_Texture *texture =
         sc_interop_videotoolbox_create_texture(vt, size, colorspace,
                                                pixel_buffer);
@@ -150,6 +162,8 @@ sc_interop_videotoolbox_new(SDL_Renderer *renderer) {
     vt->interop.ops = &ops;
 
     vt->renderer = renderer;
+    vt->color_space = AVCOL_SPC_UNSPECIFIED;
+    vt->color_range = AVCOL_RANGE_UNSPECIFIED;
 
     return vt;
 }

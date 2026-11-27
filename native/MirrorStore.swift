@@ -798,7 +798,11 @@ final class MirrorStore: ObservableObject {
                          "--max-fps=\(options.maxFPS)",
                          "--video-bit-rate=\(options.videoBitrateMbps)M",
                          "--audio-bit-rate=\(options.audioBitrateKbps)K",
-                         "--video-codec=\(options.videoCodec)"]
+                         "--video-codec=\(options.videoCodec)",
+                         // Live mirroring runs over reliable ADB/TCP, so periodic 10 s I-frames
+                         // are unnecessary and cause visible QP/subpixel text pumping on static
+                         // screens. Recordings use a separate process with the default interval.
+                         "--video-codec-options=i-frame-interval=3600"]
         if options.maxSize > 0 { arguments.append("--max-size=\(options.maxSize)") }
         if !options.audio { arguments.append("--no-audio") }
         // Letters travel as text too, so a host input method (Pinyin...) never
