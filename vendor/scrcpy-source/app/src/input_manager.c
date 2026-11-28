@@ -54,6 +54,8 @@ sc_input_manager_init(struct sc_input_manager *im,
 
     im->disconnected = false;
     im->ime_composing = false;
+    im->last_text_input_at = 0;
+    im->last_space_repeat = false;
     lanadb_input_manager = im;
 }
 
@@ -117,11 +119,6 @@ send_ctrl_keycode(struct sc_input_manager *im, enum android_keycode keycode,
     }
 }
 
-static inline void
-action_home(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_HOME, action, "HOME");
-}
-
 // LANADB: while the phone's screen is off (or showing its always-on
 // display, which takes no touches), a click or key wakes it instead of going
 // to the phone. True when it did.
@@ -133,8 +130,38 @@ static bool sc_lanadb_swallow_mouse_up;
 // shows no "press again to exit" toast on the phone's main screen.
 bool sc_lanadb_app_back(bool down);
 
+#ifdef __APPLE__
+bool sc_lanadb_handle_space(bool repeat);
+void sc_lanadb_invalidate_input_cache(void);
+#else
+static inline bool sc_lanadb_handle_space(bool repeat) {
+    (void) repeat;
+    return false;
+}
+static inline void sc_lanadb_invalidate_input_cache(void) {
+}
+#endif
+
+static bool lanadb_arrow_swipe_enabled(void);
+
+// LANADB: clear recent-typing state when the user clicks or navigates away,
+// so the next Space re-checks whether the phone's keyboard is still up.
+static void
+lanadb_invalidate_typing_context(struct sc_input_manager *im) {
+    im->last_text_input_at = 0;
+    im->last_space_repeat = false;
+    sc_lanadb_invalidate_input_cache();
+}
+
+static inline void
+action_home(struct sc_input_manager *im, enum sc_action action) {
+    lanadb_invalidate_typing_context(im);
+    send_keycode(im, AKEYCODE_HOME, action, "HOME");
+}
+
 static inline void
 action_back(struct sc_input_manager *im, enum sc_action action) {
+    lanadb_invalidate_typing_context(im);
     if (sc_lanadb_app_back(action == SC_ACTION_DOWN)) {
         return;
     }
@@ -143,6 +170,7 @@ action_back(struct sc_input_manager *im, enum sc_action action) {
 
 static inline void
 action_app_switch(struct sc_input_manager *im, enum sc_action action) {
+    lanadb_invalidate_typing_context(im);
     send_keycode(im, AKEYCODE_APP_SWITCH, action, "APP_SWITCH");
 }
 
@@ -442,6 +470,30 @@ sc_input_manager_process_text_input(struct sc_input_manager *im,
         return;
     }
 
+    // LANADB: Space with no modifier pauses / plays short videos unless the
+    // phone's keyboard is up. Handled here (after SDL3 lets the Mac input
+    // method consume candidate-selection Space) instead of an AppKit monitor,
+    // so committing Chinese text with Space never leaks an extra space.
+    bool is_plain_space = event->text && event->text[0] == ' ' && event->text[1] == '\0';
+    if (is_plain_space) {
+        bool space_repeat = im->last_space_repeat;
+        im->last_space_repeat = false;
+        uint16_t held = mod & (SDL_KMOD_CTRL | SDL_KMOD_SHIFT | SDL_KMOD_ALT | SDL_KMOD_GUI);
+        bool recent_typing = im->last_text_input_at != 0
+            && (sc_tick_now() - im->last_text_input_at) < SC_TICK_FROM_MS(1500);
+        if (lanadb_arrow_swipe_enabled() && !held && !recent_typing) {
+            if (sc_lanadb_handle_space(space_repeat)) {
+                return;
+            }
+        }
+        if (recent_typing) {
+            im->last_text_input_at = sc_tick_now();
+        }
+    } else if (event->text && event->text[0] != '\0') {
+        im->last_text_input_at = sc_tick_now();
+        im->last_space_repeat = false;
+    }
+
     struct sc_text_event evt = {
         .text = event->text,
     };
@@ -653,6 +705,18 @@ sc_input_manager_process_key(struct sc_input_manager *im,
         // The host input method owns this key (pinyin letters, Backspace,
         // Enter to commit...). The result arrives as a text event.
         return;
+    }
+
+    // LANADB: track whether the upcoming SDL_EVENT_TEXT_INPUT(" ") came from
+    // a repeated Space key-down, and invalidate typing context on keys that
+    // commonly dismiss the phone's keyboard.
+    if (down) {
+        if (sdl_keycode == SDLK_SPACE) {
+            im->last_space_repeat = repeat;
+        } else if (sdl_keycode == SDLK_RETURN || sdl_keycode == SDLK_KP_ENTER
+                || sdl_keycode == SDLK_ESCAPE) {
+            lanadb_invalidate_typing_context(im);
+        }
     }
 
     // Shortcuts that do not involve the MOD key
@@ -901,6 +965,7 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             && (sdl_keycode == SDLK_UP || sdl_keycode == SDLK_DOWN)) {
         if (!held && !im->ime_composing) {
             if (down && !repeat) {
+                lanadb_invalidate_typing_context(im);
                 LOGI("LANADB: arrow swipe %s (mod=0x%04x)",
                      sdl_keycode == SDLK_DOWN ? "next" : "previous", mod);
                 lanadb_swipe(im, sdl_keycode == SDLK_DOWN);
@@ -1087,6 +1152,10 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool control = im->controller;
     bool paused = im->screen->paused;
     bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+
+    if (down) {
+        lanadb_invalidate_typing_context(im);
+    }
 
     if (down && control && sc_lanadb_wake_if_asleep()) {
         sc_lanadb_swallow_mouse_up = true;
