@@ -458,6 +458,7 @@ scrcpy(struct scrcpy_options *options) {
         .audio = options->audio,
         .audio_dup = options->audio_dup,
         .audio_uid = options->audio_uid,
+        .audio_start_muted = options->audio_start_muted,
         .show_touches = options->show_touches,
         .stay_awake = options->stay_awake,
         .video_codec_options = options->video_codec_options,
@@ -814,6 +815,11 @@ aoa_complete:
     // There is a controller if and only if control is enabled
     assert(options->control == !!controller);
 
+    // LANADB: sync initial client mute state before sc_screen_init() builds the title bar.
+    if (options->audio_playback) {
+        sc_audio_player_set_muted(options->audio_start_muted);
+    }
+
     if (options->window) {
         struct sc_screen_params screen_params = {
             .video = options->video_playback,
@@ -1063,6 +1069,14 @@ aoa_complete:
     disconnected = ret == SCRCPY_EXIT_DISCONNECTED;
 
 end:
+    // LANADB: if closing while audio capture is active, immediately silence
+    // local playback and notify the server so it pauses media before releasing
+    // the device audio route.
+    if (controller_started && options->audio && !sc_audio_player_is_muted()) {
+        sc_audio_player_set_muted(true);
+        sc_lanadb_set_audio_capture(false);
+    }
+
     if (timeout_started) {
         sc_timeout_stop(&s->timeout);
     }

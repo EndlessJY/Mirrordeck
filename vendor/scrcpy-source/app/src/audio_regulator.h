@@ -60,6 +60,9 @@ struct sc_audio_regulator {
 
     // PTS of the next expected packet (useful to detect discontinuities)
     int64_t next_expected_pts;
+
+    // LANADB: pending full reset requested when toggling mute/unmute
+    atomic_bool reset_requested;
 };
 
 bool
@@ -68,6 +71,10 @@ sc_audio_regulator_init(struct sc_audio_regulator *ar, size_t sample_size,
 
 void
 sc_audio_regulator_destroy(struct sc_audio_regulator *ar);
+
+// LANADB: clear buffered audio and schedule a clean resampler/state reset.
+void
+sc_audio_regulator_request_reset(struct sc_audio_regulator *ar);
 
 bool
 sc_audio_regulator_push(struct sc_audio_regulator *ar, const AVFrame *frame);

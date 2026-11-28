@@ -4,6 +4,7 @@ import com.genymobile.scrcpy.AndroidVersions;
 import com.genymobile.scrcpy.AsyncProcessor;
 import com.genymobile.scrcpy.CleanUp;
 import com.genymobile.scrcpy.Options;
+import com.genymobile.scrcpy.audio.AudioEncoder;
 import com.genymobile.scrcpy.device.Device;
 import com.genymobile.scrcpy.display.DisplayInfo;
 import com.genymobile.scrcpy.model.DeviceApp;
@@ -111,6 +112,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     // Used for resetting video encoding on RESET_VIDEO message or for sending camera controls
     private SurfaceCapture surfaceCapture;
+    // LANADB: used for dynamically starting/stopping audio capture on SET_AUDIO_CAPTURE message
+    private AudioEncoder audioEncoder;
 
     public Controller(ControlChannel controlChannel, CleanUp cleanUp, Options options) {
         this.camera = options.getVideoSource() == VideoSource.CAMERA;
@@ -177,6 +180,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
     public void setSurfaceCapture(SurfaceCapture surfaceCapture) {
         this.surfaceCapture = surfaceCapture;
+    }
+
+    // LANADB:
+    public void setAudioEncoder(AudioEncoder audioEncoder) {
+        this.audioEncoder = audioEncoder;
     }
 
     private UhidManager getUhidManager() {
@@ -336,6 +344,12 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         switch (type) {
             case ControlMessage.TYPE_RESET_VIDEO:
                 resetVideo();
+                return true;
+            // LANADB: dynamically toggle device audio capture.
+            case ControlMessage.TYPE_SET_AUDIO_CAPTURE:
+                if (audioEncoder != null) {
+                    audioEncoder.setCaptureEnabled(msg.getOn());
+                }
                 return true;
             default:
                 // fall through

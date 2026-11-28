@@ -1114,7 +1114,6 @@ struct DeviceDetail: View {
     @ObservedObject private var iosMirror = IOSMirrorStore.shared
     @ObservedObject private var theme = ThemeStore.shared
     @State private var pickingApp = false
-    @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
     @AppStorage("mirror.maxFPS") private var maxFPS = 60
     @AppStorage("mirror.videoBitrateMbps") private var videoBitrateMbps = 8
@@ -1124,7 +1123,7 @@ struct DeviceDetail: View {
     /// Settings with this device's own choices on top (the AppStorage values
     /// above keep this view current when Settings change).
     private var mirrorOptions: MirrorOptions {
-        _ = (audioEnabled, maxSize, maxFPS, videoBitrateMbps, audioBitrateKbps, videoCodec, prefs.all)
+        _ = (maxSize, maxFPS, videoBitrateMbps, audioBitrateKbps, videoCodec, prefs.all)
         return MirrorOptions.current(for: device)
     }
 
@@ -1152,13 +1151,6 @@ struct DeviceDetail: View {
                     Text("60 帧").tag(60)
                     Text("120 帧").tag(120)
                 }
-                Picker("设备声音", selection: Binding<Int>(
-                    get: { current.audio.map { $0 ? 1 : 0 } ?? -1 },
-                    set: { value in prefs.update(device.identity) { $0.audio = value < 0 ? nil : value == 1 } })) {
-                    Text("跟随设置（\(audioEnabled ? "播放" : "不播放")）").tag(-1)
-                    Text("播放").tag(1)
-                    Text("不播放").tag(0)
-                }
                 Divider()
             }
             Toggle("连接后自动投屏", isOn: Binding(
@@ -1169,7 +1161,7 @@ struct DeviceDetail: View {
         }
         .menuStyle(.button)
         .fixedSize()
-        .help("这台设备单独的清晰度、帧率、声音，以及连接后自动投屏")
+        .help("这台设备单独的清晰度、帧率，以及连接后自动投屏")
     }
 
     private enum MirrorState: Equatable { case idle, starting, live }
@@ -1573,7 +1565,6 @@ struct InfoRow: View {
 
 struct MirrorSettingsView: View {
     @ObservedObject private var theme = ThemeStore.shared
-    @AppStorage("mirror.audio") private var audioEnabled = true
     @AppStorage("mirror.maxSize") private var maxSize = 1920
     @AppStorage("mirror.maxFPS") private var maxFPS = 60
     @AppStorage("mirror.videoBitrateMbps") private var videoBitrateMbps = 8
@@ -1684,13 +1675,11 @@ struct MirrorSettingsView: View {
                     Text("画面")
                 }
                 Section {
-                    Toggle("播放设备声音", isOn: $audioEnabled)
                     Picker("音频码率", selection: $audioBitrateKbps) {
                         ForEach([96, 128, 192, 256], id: \.self) { value in
                             Text("\(value) Kbps").tag(value)
                         }
                     }
-                    .disabled(!audioEnabled)
                 } header: {
                     Text("声音")
                 }

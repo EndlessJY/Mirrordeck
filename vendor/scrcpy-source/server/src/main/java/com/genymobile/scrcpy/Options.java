@@ -34,6 +34,8 @@ public class Options {
     private AudioSource audioSource = AudioSource.OUTPUT;
     private boolean audioDup;
     private int audioUid = -1;
+    // LANADB: connect audio stream without starting AudioCapture until unmuted.
+    private boolean audioStartMuted;
     private int videoBitRate = 8000000;
     private int audioBitRate = 128000;
     private float maxFps;
@@ -134,6 +136,11 @@ public class Options {
 
     public int getAudioUid() {
         return audioUid;
+    }
+
+    // LANADB:
+    public boolean getAudioStartMuted() {
+        return audioStartMuted;
     }
 
     public int getVideoBitRate() {
@@ -396,6 +403,10 @@ public class Options {
                     break;
                 case "audio_uid":
                     options.audioUid = Integer.parseInt(value);
+                    break;
+                // LANADB:
+                case "audio_start_muted":
+                    options.audioStartMuted = Boolean.parseBoolean(value);
                     break;
                 case "max_size":
                     options.maxSize = Integer.parseInt(value);

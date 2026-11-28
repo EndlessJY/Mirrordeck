@@ -30,6 +30,8 @@ public final class ControlMessage {
     public static final int TYPE_CAMERA_ZOOM_OUT = 20;
     public static final int TYPE_RESIZE_DISPLAY = 21;
     public static final int TYPE_SCAN_FILE = 22;
+    // LANADB: dynamically start/stop server-side audio capture.
+    public static final int TYPE_SET_AUDIO_CAPTURE = 23;
 
     public static final long SEQUENCE_INVALID = 0;
 
@@ -192,6 +194,14 @@ public final class ControlMessage {
         ControlMessage msg = new ControlMessage();
         msg.type = TYPE_SCAN_FILE;
         msg.text = path;
+        return msg;
+    }
+
+    // LANADB:
+    public static ControlMessage createSetAudioCapture(boolean on) {
+        ControlMessage msg = new ControlMessage();
+        msg.type = TYPE_SET_AUDIO_CAPTURE;
+        msg.on = on;
         return msg;
     }
 

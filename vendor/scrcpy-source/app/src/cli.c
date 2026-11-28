@@ -93,6 +93,7 @@ enum {
     OPT_NO_MOUSE_HOVER,
     OPT_AUDIO_DUP,
     OPT_AUDIO_UID,
+    OPT_AUDIO_START_MUTED,
     OPT_GAMEPAD,
     OPT_NEW_DISPLAY,
     OPT_LIST_APPS,
@@ -212,6 +213,13 @@ static const struct sc_option options[] = {
                 "which then no longer plays on the device or in other "
                 "captures.\n"
                 "This feature is only available with --audio-source=playback.",
+    },
+    {
+        // LANADB: connect audio stream without capturing device audio until unmuted.
+        .longopt_id = OPT_AUDIO_START_MUTED,
+        .longopt = "audio-start-muted",
+        .text = "Connect the audio stream without starting device audio "
+                "capture until unmuted via control message.",
     },
     {
         .longopt_id = OPT_AUDIO_ENCODER,
@@ -2958,6 +2966,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 opts->audio_uid = (int32_t) uid;
                 break;
             }
+            case OPT_AUDIO_START_MUTED:
+                opts->audio_start_muted = true;
+                break;
             case 'G':
                 opts->gamepad_input_mode = SC_GAMEPAD_INPUT_MODE_UHID_OR_AOA;
                 break;

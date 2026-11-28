@@ -6,7 +6,6 @@ import AVFoundation
 import UniformTypeIdentifiers
 
 struct MirrorOptions {
-    var audio = true
     var maxSize = 1920
     var maxFPS = 60
     var videoBitrateMbps = 8
@@ -800,7 +799,9 @@ final class MirrorStore: ObservableObject {
                          "--audio-bit-rate=\(options.audioBitrateKbps)K",
                          "--video-codec=\(options.videoCodec)"]
         if options.maxSize > 0 { arguments.append("--max-size=\(options.maxSize)") }
-        if !options.audio { arguments.append("--no-audio") }
+        // Start with audio capture paused so the phone keeps playing on its
+        // own speaker until the user unmutes from the title bar.
+        arguments.append("--audio-start-muted")
         // Letters travel as text too, so a host input method (Pinyin...) never
         // leaks raw keys; the title bar build pastes non-ASCII text.
         arguments.append("--prefer-text")
@@ -818,7 +819,6 @@ final class MirrorStore: ObservableObject {
         let actionToken = UUID().uuidString
         environment["MIRRORDECK_SESSION_TOKEN"] = actionToken
         environment["MIRRORDECK_RECORDING"] = "0"
-        environment["MIRRORDECK_AUDIO_ENABLED"] = options.audio ? "1" : "0"
         environment["MIRRORDECK_ARROW_SWIPE"] = Self.arrowSwipe ? "1" : "0"
         // The first mirror after installing points at the ⌘/ shortcut sheet.
         if !UserDefaults.standard.bool(forKey: "tips.shortcutSheet") {
@@ -1026,14 +1026,6 @@ final class MirrorStore: ObservableObject {
         while Date() < deadline && activeRecorders.contains(where: \.isRunning) {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
-    }
-
-    /// The device's main mirror is capturing its sound. Android lets only one
-    /// capture of the device's output work at a time: a second one (a
-    /// single-app window) takes it over, and when that window closes the
-    /// sound goes back to the phone's speaker instead of the mirror.
-    func mainMirrorCapturesAudio(for device: ADBDevice) -> Bool {
-        processes[device.identity] != nil && sessionOptions[device.identity]?.audio == true
     }
 
     /// Puts every mirror window (Android, single-app and iPhone) side by

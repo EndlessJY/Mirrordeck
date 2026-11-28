@@ -64,6 +64,9 @@ public class ControlMessageReader {
                 return parseResizeDisplay();
             case ControlMessage.TYPE_SCAN_FILE:
                 return parseScanFile();
+            // LANADB:
+            case ControlMessage.TYPE_SET_AUDIO_CAPTURE:
+                return parseSetAudioCapture();
             default:
                 throw new ControlProtocolException("Unknown event type: " + type);
         }
@@ -188,6 +191,12 @@ public class ControlMessageReader {
     private ControlMessage parseScanFile() throws IOException {
         String path = parseString();
         return ControlMessage.createScanFile(path);
+    }
+
+    // LANADB:
+    private ControlMessage parseSetAudioCapture() throws IOException {
+        boolean on = dis.readBoolean();
+        return ControlMessage.createSetAudioCapture(on);
     }
 
     private Position parsePosition() throws IOException {

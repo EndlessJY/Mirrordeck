@@ -365,6 +365,8 @@ struct scrcpy_options {
     bool mouse_hover;
     bool audio_dup;
     int32_t audio_uid; // -1: every app
+    // LANADB: connect audio stream but do not start device audio capture until unmuted.
+    bool audio_start_muted;
     const char *new_display; // [<width>x<height>][/<dpi>] parsed by the server
     const char *start_app;
     bool vd_destroy_content;

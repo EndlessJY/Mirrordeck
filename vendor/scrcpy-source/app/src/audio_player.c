@@ -3,14 +3,29 @@
 #include "util/log.h"
 #include "util/memory.h"
 #include "SDL3/SDL_hints.h"
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
 static atomic_bool sc_playback_muted = true;
+// LANADB: active audio player, protected by mutex so mute toggles can safely
+// reset the audio regulator from the UI thread.
+static pthread_mutex_t lanadb_ap_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct sc_audio_player *lanadb_audio_player;
 
 void sc_audio_player_set_muted(bool muted) {
-    atomic_store(&sc_playback_muted, muted);
+    if (muted) {
+        atomic_store(&sc_playback_muted, true);
+    }
+    pthread_mutex_lock(&lanadb_ap_mutex);
+    if (lanadb_audio_player) {
+        sc_audio_regulator_request_reset(&lanadb_audio_player->audioreg);
+    }
+    pthread_mutex_unlock(&lanadb_ap_mutex);
+    if (!muted) {
+        atomic_store(&sc_playback_muted, false);
+    }
 }
 
 bool sc_audio_player_is_muted(void) {
@@ -52,11 +67,13 @@ sc_audio_player_stream_callback(void *userdata, SDL_AudioStream *stream,
     while (len) {
         size_t chunk_size = MIN(ap->aout_buffer_size, len);
         uint32_t out_samples = chunk_size / ap->audioreg.sample_size;
-        sc_audio_regulator_pull(&ap->audioreg, ap->aout_buffer,
-                                out_samples);
         if (sc_audio_player_is_muted()) {
+            // LANADB: stay silent without pulling from the regulator so
+            // underflow does not accumulate while capture is stopped.
             memset(ap->aout_buffer, 0, chunk_size);
         } else {
+            sc_audio_regulator_pull(&ap->audioreg, ap->aout_buffer,
+                                    out_samples);
             int level = atomic_load(&sc_playback_level);
             if (level < SC_VOLUME_STEPS) {
                 // Squared, so the steps sound even to the ear.
@@ -83,6 +100,11 @@ sc_audio_player_stream_callback(void *userdata, SDL_AudioStream *stream,
 static enum sc_sink_result
 sc_audio_player_frame_sink_push(struct sc_frame_sink *sink,
                                 const AVFrame *frame) {
+    // LANADB: drop any trailing frames received while muted.
+    if (sc_audio_player_is_muted()) {
+        return SC_SINK_OK;
+    }
+
     struct sc_audio_player *ap = DOWNCAST(sink);
 
     bool ok = sc_audio_regulator_push(&ap->audioreg, frame);
@@ -158,9 +180,16 @@ sc_audio_player_frame_sink_open(struct sc_frame_sink *sink,
     ap->device = SDL_GetAudioStreamDevice(ap->stream);
     assert(ap->device);
 
+    pthread_mutex_lock(&lanadb_ap_mutex);
+    lanadb_audio_player = ap;
+    pthread_mutex_unlock(&lanadb_ap_mutex);
+
     ok = SDL_ResumeAudioDevice(ap->device);
     if (!ok) {
         LOGE("Could not resume audio device: %s", SDL_GetError());
+        pthread_mutex_lock(&lanadb_ap_mutex);
+        lanadb_audio_player = NULL;
+        pthread_mutex_unlock(&lanadb_ap_mutex);
         SDL_DestroyAudioStream(ap->stream);
         free(ap->aout_buffer);
         sc_audio_regulator_destroy(&ap->audioreg);
@@ -173,6 +202,12 @@ sc_audio_player_frame_sink_open(struct sc_frame_sink *sink,
 static void
 sc_audio_player_frame_sink_close(struct sc_frame_sink *sink) {
     struct sc_audio_player *ap = DOWNCAST(sink);
+
+    pthread_mutex_lock(&lanadb_ap_mutex);
+    if (lanadb_audio_player == ap) {
+        lanadb_audio_player = NULL;
+    }
+    pthread_mutex_unlock(&lanadb_ap_mutex);
 
     assert(ap->stream);
     assert(ap->device);
