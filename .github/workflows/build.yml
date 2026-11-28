@@ -14,29 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pick:
-    name: 选择构建机
-    runs-on: [self-hosted, mac-local]
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      runner: ${{ steps.pick.outputs.runner }}
-    steps:
-      - name: 选择运行环境
-        id: pick
-        run: |
-          runner="$("$HOME/actions-runners/bin/pick-runner.sh" macos-15)"
-          echo "选用 runner：$runner"
-          echo "runner=$runner" >> "$GITHUB_OUTPUT"
-
   build:
     name: macOS (Apple 芯片)
-    needs: pick
-    # 有免费额度时使用 GitHub 托管的 macos-15，额度不足时切换到本机 mac-local runner。
-    # Homebrew's libraries here are built for the host macOS, which sets the
-    # app's minimum system (see build_app.sh).
-    runs-on: ${{ fromJSON(needs.pick.outputs.runner) }}
+    # 公开仓库使用 GitHub 托管的 macos-15（免费且不占私有仓库额度），
+    # 确保 Homebrew 依赖与打包产物稳定保持 LSMinimumSystemVersion=15.0。
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +98,16 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: ./build_app.sh
+
+      - name: 校验最低系统版本
+        run: |
+          plist="build/幕台.app/Contents/Info.plist"
+          minimum=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$plist")
+          echo "检测到 LSMinimumSystemVersion=${minimum}"
+          if [[ "$minimum" != "15.0" ]]; then
+            echo "错误：正式构建要求 LSMinimumSystemVersion == 15.0，当前为 ${minimum}（请确认在 macOS 15 构建机上打包）" >&2
+            exit 1
+          fi
 
       - name: 打包
         run: |

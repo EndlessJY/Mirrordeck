@@ -28,6 +28,7 @@ fi
 actual_sha="$(/usr/bin/shasum -a 256 "$archive" | /usr/bin/awk '{print $1}')"
 [[ "$actual_sha" == "$expected_sha" ]] || { echo "scrcpy 发行包校验失败" >&2; exit 1; }
 
+export MACOSX_DEPLOYMENT_TARGET=15.0
 if [[ ! -d build/custom-scrcpy ]]; then
   /opt/homebrew/bin/meson setup build/custom-scrcpy vendor/scrcpy-source \
     --buildtype=release -Dcompile_server=false -Dportable=true -Dstatic=false
@@ -66,7 +67,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 webp=/opt/homebrew/opt/webp
 [[ -f "$webp/lib/libwebpmux.a" ]] || { echo "缺少 libwebp 静态库：brew install webp" >&2; exit 1; }
 /usr/bin/swiftc -O -parse-as-library -swift-version 5 \
-  -target arm64-apple-macos14.0 \
+  -target arm64-apple-macos15.0 \
   -framework SwiftUI -framework AppKit -framework Network \
   -import-objc-header native/WebPBridge.h -I "$webp/include" \
   -Xlinker "$webp/lib/libwebpmux.a" -Xlinker "$webp/lib/libwebp.a" \
