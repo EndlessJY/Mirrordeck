@@ -109,7 +109,8 @@ jobs:
           echo "PYTHON_BIN=$python_bin" >> "$GITHUB_ENV"
 
       - name: 单元测试
-        run: "$PYTHON_BIN" -m unittest discover -s tests -v
+        run: |
+          "$PYTHON_BIN" -m unittest discover -s tests -v
 
       - name: 构建应用
         env:
