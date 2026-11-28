@@ -14,34 +14,102 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pick:
+    name: 选择构建机
+    runs-on: [self-hosted, mac-local]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - name: 选择运行环境
+        id: pick
+        run: |
+          runner="$("$HOME/actions-runners/bin/pick-runner.sh" macos-15)"
+          echo "选用 runner：$runner"
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+
   build:
     name: macOS (Apple 芯片)
-    # GitHub no longer offers macOS 14 runners. Homebrew's libraries here are
-    # built for macOS 15, which sets the app's minimum system (see build_app.sh).
-    runs-on: macos-15
+    needs: pick
+    # 有免费额度时使用 GitHub 托管的 macos-15，额度不足时切换到本机 mac-local runner。
+    # Homebrew's libraries here are built for the host macOS, which sets the
+    # app's minimum system (see build_app.sh).
+    runs-on: ${{ fromJSON(needs.pick.outputs.runner) }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Controls only get the current system look (Liquid Glass) when the app
-      # is built with the macOS 26 SDK; the runner's default Xcode is older.
-      - name: 选用 Xcode 26
+      - name: 准备环境与清理残留产物
         run: |
+          for dir in /opt/homebrew/bin /opt/homebrew/sbin; do
+            if [[ -d "$dir" ]]; then
+              echo "$dir" >> "$GITHUB_PATH"
+            fi
+          done
+          if [[ -z "${ANDROID_HOME:-}" && -z "${ANDROID_SDK_ROOT:-}" && -d "$HOME/Library/Android/sdk" ]]; then
+            echo "ANDROID_HOME=$HOME/Library/Android/sdk" >> "$GITHUB_ENV"
+            echo "ANDROID_SDK_ROOT=$HOME/Library/Android/sdk" >> "$GITHUB_ENV"
+          fi
+          if [[ -z "${JAVA_HOME:-}" && -d "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" ]]; then
+            echo "JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" >> "$GITHUB_ENV"
+          fi
+          rm -rf build release-notes.md
+
+      # Controls only get the current system look (Liquid Glass) when the app
+      # is built with the macOS 26 SDK; GitHub's default Xcode on macos-15 is older.
+      - name: 选用 Xcode 26 / 检查 SDK
+        run: |
+          sdk_ver=$(xcrun --show-sdk-version 2>/dev/null || true)
+          sdk_major="${sdk_ver%%.*}"
+          if [[ "$sdk_major" =~ ^[0-9]+$ && "$sdk_major" -ge 26 ]]; then
+            echo "当前构建环境已提供 macOS SDK ${sdk_ver} ($(xcode-select -p))，无需切换 Xcode"
+            exit 0
+          fi
           xcode=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)
-          [[ -n "$xcode" ]] || { echo "构建机上没有 Xcode 26" >&2; ls -d /Applications/Xcode*.app; exit 1; }
+          [[ -n "$xcode" ]] || { echo "构建机上没有 Xcode 26" >&2; ls -d /Applications/Xcode*.app 2>/dev/null || true; exit 1; }
           sudo xcode-select -s "$xcode"
           xcrun --show-sdk-version
 
-      - name: 安装构建依赖
+      - name: 安装或校验构建依赖
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: brew install python@3.13 meson ninja pkgconf dylibbundler sdl3 ffmpeg libusb webp
+          RUNNER_ENV: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENV" == "self-hosted" ]]; then
+            missing=()
+            for pkg in meson ninja pkgconf dylibbundler sdl3 ffmpeg libusb webp; do
+              if ! brew list --versions "$pkg" >/dev/null 2>&1; then
+                missing+=("$pkg")
+              fi
+            done
+            if (( ${#missing[@]} > 0 )); then
+              echo "本机缺少构建依赖：${missing[*]}，按需安装..."
+              brew install "${missing[@]}"
+            else
+              echo "本机 self-hosted runner 构建依赖已就绪，跳过全局 brew install"
+            fi
+          else
+            brew install python@3.13 meson ninja pkgconf dylibbundler sdl3 ffmpeg libusb webp
+          fi
+
+          python_bin=""
+          for candidate in /opt/homebrew/opt/python@3.13/bin/python3.13 /opt/homebrew/bin/python3; do
+            if [[ -x "$candidate" ]] && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+              python_bin="$candidate"
+              break
+            fi
+          done
+          [[ -n "$python_bin" ]] || { echo "缺少 Python 3.11+ 环境" >&2; exit 1; }
+          echo "选用 Python：$("$python_bin" --version) ($python_bin)"
+          echo "PYTHON_BIN=$python_bin" >> "$GITHUB_ENV"
 
       - name: 单元测试
-        run: /opt/homebrew/opt/python@3.13/bin/python3.13 -m unittest discover -s tests -v
+        run: "$PYTHON_BIN" -m unittest discover -s tests -v
 
       - name: 构建应用
         env:
