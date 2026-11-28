@@ -412,6 +412,8 @@ enum {
 }
 @end
 
+static void lanadb_apply_gamut(NSWindow *window);
+
 @interface LANADBTitlebarController : NSTitlebarAccessoryViewController
 @property(nonatomic, copy) NSString *serial;
 @property(nonatomic, copy) NSString *adbPath;
@@ -542,6 +544,10 @@ enum {
                                                  name:NSWindowDidMoveNotification object:window];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowDidBecomeKey:)
                                                  name:NSWindowDidBecomeKeyNotification object:window];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowDidChangeScreen:)
+                                                 name:NSWindowDidChangeScreenNotification object:window];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowDidChangeScreen:)
+                                                 name:NSWindowDidChangeScreenProfileNotification object:window];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:self
         selector:@selector(mirrorStateChanged:)
         name:@"uk.agpt.mirrordeck.mirror.state" object:nil];
@@ -1167,6 +1173,12 @@ enum {
     [self layoutHelp];
     [self layoutPicture];
     [self schedulePlaceReport];
+    lanadb_apply_gamut(self.targetWindow);
+}
+
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+    (void) notification;
+    lanadb_apply_gamut(self.targetWindow);
 }
 
 // LANADB: the window follows the picture's proportions — after a size set by
@@ -1874,9 +1886,15 @@ enum {
 // the device's own display gamut so colours match the phone.
 static void
 lanadb_apply_gamut(NSWindow *window) {
+    if (!window || !window.contentView) {
+        return;
+    }
     const char *gamut = getenv("MIRRORDECK_GAMUT");
     CFStringRef name = gamut && !strcmp(gamut, "p3") ? kCGColorSpaceDisplayP3 : kCGColorSpaceSRGB;
     CGColorSpaceRef space = CGColorSpaceCreateWithName(name);
+    if (!space) {
+        return;
+    }
     NSMutableArray<NSView *> *views = [NSMutableArray arrayWithObject:window.contentView];
     while (views.count) {
         NSView *view = views.firstObject;
@@ -1887,7 +1905,10 @@ lanadb_apply_gamut(NSWindow *window) {
             CALayer *layer = layers.firstObject;
             [layers removeObjectAtIndex:0];
             if ([layer isKindOfClass:[CAMetalLayer class]]) {
-                ((CAMetalLayer *) layer).colorspace = space;
+                CAMetalLayer *metal = (CAMetalLayer *) layer;
+                if (!metal.colorspace || !CFEqual(metal.colorspace, space)) {
+                    metal.colorspace = space;
+                }
             }
             [layers addObjectsFromArray:layer.sublayers ?: @[]];
         }

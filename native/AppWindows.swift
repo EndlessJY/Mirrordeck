@@ -403,6 +403,9 @@ final class AppWindowStore: ObservableObject {
             "--video-bit-rate=\(options.videoBitrateMbps)M",
             "--audio-bit-rate=\(options.audioBitrateKbps)K",
             "--video-codec=\(effectiveCodec)",
+            // Avoid periodic 10 s I-frame QP/subpixel text pumping on static pages;
+            // on-demand recording calls sc_lanadb_reset_video() for an immediate keyframe.
+            "--video-codec-options=i-frame-interval=3600",
             "--prefer-text",
         ]
         if options.maxSize > 0 { arguments.append("--max-size=\(options.maxSize)") }
