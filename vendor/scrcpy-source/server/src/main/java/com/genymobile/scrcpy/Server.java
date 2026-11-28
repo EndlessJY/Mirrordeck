@@ -131,7 +131,12 @@ public final class Server {
                 if (audioCodec == AudioCodec.RAW) {
                     audioRecorder = new AudioRawRecorder(audioCapture, audioStreamer);
                 } else {
-                    audioRecorder = new AudioEncoder(audioCapture, audioStreamer, options);
+                    AudioEncoder audioEncoder = new AudioEncoder(audioCapture, audioStreamer, options);
+                    audioRecorder = audioEncoder;
+                    // LANADB: wire controller so client mute/unmute can hot-toggle capture.
+                    if (controller != null) {
+                        controller.setAudioEncoder(audioEncoder);
+                    }
                 }
                 asyncProcessors.add(audioRecorder);
             }

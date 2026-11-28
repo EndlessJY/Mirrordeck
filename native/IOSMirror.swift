@@ -157,7 +157,6 @@ final class IOSMirrorStore: ObservableObject {
 /// What the window's title bar and overlay show.
 final class IOSMirrorModel: ObservableObject {
     @Published var pinned = false
-    @Published var audioAllowed = true
     @Published var audioOn = false
     @Published var captureKind: String?        // "record" or "gif"
     @Published var countdown = 0
@@ -188,7 +187,6 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     private var frameSize = CGSize.zero
     private var closing = false
     private var disconnectObserver: NSObjectProtocol?
-    private var defaultsObserver: NSObjectProtocol?
     private var countdownTimer: Timer?
     private var recordingSource: URL?
     private var recordingDestination: URL?
@@ -217,22 +215,8 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
         videoOutput.setSampleBufferDelegate(self, queue: frameQueue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
         if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
-        let audioAllowed = UserDefaults.standard.object(forKey: "mirror.audio") as? Bool ?? true
-        model.audioAllowed = audioAllowed
         audioPreview.volume = 0
         if session.canAddOutput(audioPreview) { session.addOutput(audioPreview) }
-        defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            let allowed = UserDefaults.standard.object(forKey: "mirror.audio") as? Bool ?? true
-            if self.model.audioAllowed != allowed {
-                self.model.audioAllowed = allowed
-                if !allowed, self.model.audioOn {
-                    self.model.audioOn = false
-                    self.audioPreview.volume = 0
-                }
-            }
-        }
         makeWindow()
         watchDisconnect()
         sessionQueue.async { [session] in session.startRunning() }
@@ -427,10 +411,6 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
             NotificationCenter.default.removeObserver(observer)
             disconnectObserver = nil
         }
-        if let observer = defaultsObserver {
-            NotificationCenter.default.removeObserver(observer)
-            defaultsObserver = nil
-        }
         // Stays alive until the capture is fully torn down: releasing the
         // window and its preview while the session is still stopping on its
         // queue blocks the main thread.
@@ -489,7 +469,6 @@ final class IOSMirrorWindow: NSObject, NSWindowDelegate, AVCaptureVideoDataOutpu
     }
 
     private func toggleSound() {
-        guard model.audioAllowed else { return }
         model.audioOn.toggle()
         audioPreview.volume = model.audioOn ? 1 : 0
     }
@@ -993,14 +972,13 @@ private struct IOSMirrorToolbar: View {
                     .font(.system(size: 16, weight: .medium))
             }
             IOSToolButton(
-                help: !model.audioAllowed ? "未播放设备声音，请在设置中开启" :
-                      (model.audioOn ? "关闭声音" : "播放声音"),
-                active: model.audioAllowed && model.audioOn,
+                help: model.audioOn ? "关闭声音" : "播放声音",
+                active: model.audioOn,
                 recording: false,
-                enabled: model.audioAllowed,
+                enabled: true,
                 action: sound
             ) {
-                Image(systemName: model.audioAllowed && model.audioOn ? "speaker.wave.2.fill" : "speaker.slash")
+                Image(systemName: model.audioOn ? "speaker.wave.2.fill" : "speaker.slash")
                     .font(.system(size: 16, weight: .medium))
             }
             IOSToolButton(

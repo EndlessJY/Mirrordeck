@@ -142,6 +142,31 @@ bool
 sc_audio_regulator_push(struct sc_audio_regulator *ar, const AVFrame *frame) {
     SwrContext *swr_ctx = ar->swr_ctx;
 
+    // LANADB: complete full resampler/state reset after a mute/unmute toggle.
+    if (atomic_exchange_explicit(&ar->reset_requested, false,
+                                 memory_order_acq_rel)) {
+        sc_mutex_lock(&ar->mutex);
+        uint32_t pending = sc_audiobuf_can_read(&ar->buf);
+        if (pending) {
+            sc_audiobuf_read(&ar->buf, NULL, pending);
+        }
+        sc_mutex_unlock(&ar->mutex);
+
+        int reset_ret = swr_init(swr_ctx);
+        if (reset_ret < 0) {
+            LOGW("Could not reset resampler: %s", av_err2str(reset_ret));
+        }
+        sc_average_init(&ar->avg_buffering, 128);
+        ar->avg_buffering.avg = ar->target_buffering;
+        ar->compensation_active = false;
+        ar->samples_since_resync = 0;
+        ar->underflow_report = 0;
+        ar->next_expected_pts = 0;
+        atomic_store_explicit(&ar->underflow, 0, memory_order_relaxed);
+        atomic_store_explicit(&ar->played, false, memory_order_relaxed);
+        atomic_store_explicit(&ar->received, false, memory_order_relaxed);
+    }
+
     uint32_t input_samples = frame->nb_samples;
 
     assert(frame->pts >= 0);
@@ -428,6 +453,7 @@ sc_audio_regulator_init(struct sc_audio_regulator *ar, size_t sample_size,
     ar->underflow_report = 0;
     ar->compensation_active = false;
     ar->next_expected_pts = 0;
+    atomic_init(&ar->reset_requested, false);
 
     return true;
 
@@ -447,4 +473,20 @@ sc_audio_regulator_destroy(struct sc_audio_regulator *ar) {
     sc_audiobuf_destroy(&ar->buf);
     sc_mutex_destroy(&ar->mutex);
     swr_free(&ar->swr_ctx);
+}
+
+// LANADB: clear buffered samples immediately and ask the decoder thread to
+// reset resampler & drift state before pushing new frames.
+void
+sc_audio_regulator_request_reset(struct sc_audio_regulator *ar) {
+    atomic_store_explicit(&ar->reset_requested, true, memory_order_release);
+    sc_mutex_lock(&ar->mutex);
+    uint32_t pending = sc_audiobuf_can_read(&ar->buf);
+    if (pending) {
+        sc_audiobuf_read(&ar->buf, NULL, pending);
+    }
+    atomic_store_explicit(&ar->played, false, memory_order_relaxed);
+    atomic_store_explicit(&ar->received, false, memory_order_relaxed);
+    atomic_store_explicit(&ar->underflow, 0, memory_order_relaxed);
+    sc_mutex_unlock(&ar->mutex);
 }

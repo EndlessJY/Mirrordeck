@@ -410,25 +410,19 @@ final class AppWindowStore: ObservableObject {
         // Where this app's window was last left on this device.
         arguments += WindowPlaces.arguments(key)
         // AAC allows single-app MP4 recordings to mux live audio playable in chat apps.
-        // Android 13+: the window captures only its app's sound, which then
-        // plays nowhere else (not on the phone, not in the main mirror), so
-        // the two stay independent. Before that, sound is device-wide: the
-        // window leaves it to a main mirror that carries it.
-        let audio: Bool
+        // Android 13+: the window captures only its app's sound when unmuted,
+        // keeping it independent of the main mirror. Audio starts paused so the
+        // phone speaker stays active until the user unmutes from the title bar.
         var ownAudio = false
-        if options.audio, let appUID {
-            audio = true
+        if let appUID {
             ownAudio = true
             arguments += ["--audio-source=playback", "--audio-uid=\(appUID)"]
-        } else {
-            audio = options.audio && !MirrorStore.shared.mainMirrorCapturesAudio(for: device)
         }
-        arguments.append(audio ? "--audio-codec=aac" : "--no-audio")
+        arguments += ["--audio-codec=aac", "--audio-start-muted"]
         process.arguments = arguments
         let token = UUID().uuidString
         var environment = environment(serial: transport.endpoint, tools: tools)
         environment["MIRRORDECK_SESSION_TOKEN"] = token
-        environment["MIRRORDECK_AUDIO_ENABLED"] = audio ? "1" : "0"
         // Its sound is taken before the phone's volume applies: the window's
         // volume buttons and keys then set this window's own volume.
         environment["MIRRORDECK_APP_OWN_AUDIO"] = ownAudio ? "1" : "0"

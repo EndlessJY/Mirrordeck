@@ -131,7 +131,9 @@ public class AudioDirectCapture implements AudioCapture {
         if (recorder != null) {
             // Will call .stop() if necessary, without throwing an IllegalStateException
             recorder.release();
+            recorder = null;
         }
+        reader = null;
     }
 
     @Override

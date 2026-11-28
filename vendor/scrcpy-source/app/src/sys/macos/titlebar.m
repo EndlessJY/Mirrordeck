@@ -7,6 +7,7 @@
 #include "sys/macos/titlebar.h"
 #include <stdbool.h>
 void sc_audio_player_set_muted(bool muted);
+bool sc_lanadb_set_audio_capture(bool enabled);
 bool sc_lanadb_set_display_power(bool on);
 bool sc_lanadb_press_key(int keycode);
 bool sc_lanadb_tap_center(void);
@@ -1536,8 +1537,8 @@ enum {
     [self setButton:SC_BUTTON_MUTE
              symbol:!self.audioAvailable || (self.musicMuted && self.musicKnown) ?
                     @"speaker.slash" : @"speaker.wave.2.fill"
-              title:!self.audioAvailable ? @"未播放设备声音，请在设置中开启" :
-                    (self.musicMuted ? @"投屏已静音，点击恢复声音" : @"点击静音投屏声音")
+              title:!self.audioAvailable ? @"当前窗口不可播放设备声音" :
+                    (self.musicMuted ? @"播放设备声音" : @"静音投屏声音（恢复手机外放）")
              active:self.audioAvailable && !self.musicMuted && self.musicKnown
               color:accent];
     _buttons[SC_BUTTON_MUTE].enabled = self.audioAvailable;
@@ -1721,8 +1722,16 @@ enum {
     }
     if (index == SC_BUTTON_MUTE) {
         if (!self.audioAvailable) { return; }
-        self.musicMuted = !self.musicMuted;
-        sc_audio_player_set_muted(self.musicMuted);
+        // LANADB: toggle both local playback mute and device-side audio capture
+        // so the phone's speaker resumes immediately when muted.
+        BOOL muted = !self.musicMuted;
+        sc_audio_player_set_muted(muted);
+        if (!sc_lanadb_set_audio_capture(!muted)) {
+            sc_audio_player_set_muted(!muted);
+            [self showFeedback:@"操作失败，请检查设备连接" nearButton:SC_BUTTON_MUTE];
+            return;
+        }
+        self.musicMuted = muted;
         [self updateButtons];
         return;
     }

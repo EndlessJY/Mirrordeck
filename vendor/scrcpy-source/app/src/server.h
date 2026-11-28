@@ -57,6 +57,8 @@ struct sc_server_params {
     bool audio;
     bool audio_dup;
     int32_t audio_uid;
+    // LANADB: start with audio capture paused until client sends SET_AUDIO_CAPTURE(true).
+    bool audio_start_muted;
     bool show_touches;
     bool stay_awake;
     bool force_adb_forward;

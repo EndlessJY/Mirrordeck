@@ -63,6 +63,19 @@ sc_lanadb_reset_video(void) {
     return sc_controller_push_msg(lanadb_controller, &msg);
 }
 
+// LANADB: dynamically start or stop audio capture on the device so the phone
+// keeps its own speaker output while the mirror window is muted.
+bool
+sc_lanadb_set_audio_capture(bool enabled) {
+    if (!lanadb_controller) {
+        return false;
+    }
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_SET_AUDIO_CAPTURE;
+    msg.set_audio_capture.enabled = enabled;
+    return sc_controller_push_msg(lanadb_controller, &msg);
+}
+
 bool
 sc_controller_init(struct sc_controller *controller, sc_socket control_socket,
                    const struct sc_controller_callbacks *cbs,

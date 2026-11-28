@@ -194,6 +194,10 @@ sc_control_msg_serialize(const struct sc_control_msg *msg, uint8_t *buf) {
                                       SC_CONTROL_MSG_SCAN_FILE_PATH_MAX_LENGTH);
             return 1 + len;
         };
+        // LANADB: dynamically toggle server-side audio capture.
+        case SC_CONTROL_MSG_TYPE_SET_AUDIO_CAPTURE:
+            buf[1] = msg->set_audio_capture.enabled ? 1 : 0;
+            return 2;
         case SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL:
         case SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL:
         case SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS:
@@ -349,6 +353,11 @@ sc_control_msg_log(const struct sc_control_msg *msg) {
         case SC_CONTROL_MSG_TYPE_SCAN_FILE:
             LOG_CMSG("scan file \"%s\"", msg->scan_file.path);
             break;
+        // LANADB:
+        case SC_CONTROL_MSG_TYPE_SET_AUDIO_CAPTURE:
+            LOG_CMSG("set audio capture %s",
+                     msg->set_audio_capture.enabled ? "on" : "off");
+            break;
         default:
             LOG_CMSG("unknown type: %u", (unsigned) msg->type);
             break;
@@ -362,7 +371,8 @@ sc_control_msg_is_droppable(const struct sc_control_msg *msg) {
     // Cannot drop UHID_DESTROY messages either, because a further UHID_CREATE
     // with the same id may fail.
     return msg->type != SC_CONTROL_MSG_TYPE_UHID_CREATE
-        && msg->type != SC_CONTROL_MSG_TYPE_UHID_DESTROY;
+        && msg->type != SC_CONTROL_MSG_TYPE_UHID_DESTROY
+        && msg->type != SC_CONTROL_MSG_TYPE_SET_AUDIO_CAPTURE;
 }
 
 void

@@ -82,4 +82,8 @@ sc_lanadb_press_key(int keycode);
 bool
 sc_lanadb_reset_video(void);
 
+// LANADB: dynamically start/stop audio capture on the device.
+bool
+sc_lanadb_set_audio_capture(bool enabled);
+
 #endif

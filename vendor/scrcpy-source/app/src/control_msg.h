@@ -50,6 +50,8 @@ enum sc_control_msg_type {
     SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT,
     SC_CONTROL_MSG_TYPE_RESIZE_DISPLAY,
     SC_CONTROL_MSG_TYPE_SCAN_FILE,
+    // LANADB: dynamically start/stop server-side audio capture.
+    SC_CONTROL_MSG_TYPE_SET_AUDIO_CAPTURE,
 };
 
 enum sc_copy_key {
@@ -128,6 +130,10 @@ struct sc_control_msg {
         struct {
             char *path; // owned, to be freed by free()
         } scan_file;
+        // LANADB: payload for SC_CONTROL_MSG_TYPE_SET_AUDIO_CAPTURE.
+        struct {
+            bool enabled;
+        } set_audio_capture;
     };
 };
 

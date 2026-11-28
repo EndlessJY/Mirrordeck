@@ -25,6 +25,8 @@ public final class AudioPlaybackCapture implements AudioCapture {
 
     private AudioRecord recorder;
     private AudioRecordReader reader;
+    // LANADB: keep policy reference so stop() can unregister it without killing the server.
+    private Object audioPolicy;
 
     public AudioPlaybackCapture(boolean keepPlayingOnDevice, int uid) {
         this.keepPlayingOnDevice = keepPlayingOnDevice;
@@ -126,6 +128,7 @@ public final class AudioPlaybackCapture implements AudioCapture {
             if (result != 0) {
                 throw new RuntimeException("registerAudioPolicy() returned " + result);
             }
+            this.audioPolicy = audioPolicy;
 
             // audioPolicy.createAudioRecordSink(audioPolicy);
             Method createAudioRecordSinkClass = audioPolicyClass.getMethod("createAudioRecordSink", audioMixClass);
@@ -156,6 +159,46 @@ public final class AudioPlaybackCapture implements AudioCapture {
         if (recorder != null) {
             // Will call .stop() if necessary, without throwing an IllegalStateException
             recorder.release();
+            recorder = null;
+        }
+        reader = null;
+        // LANADB: explicitly unregister the AudioPolicy so the app's audio
+        // immediately returns to the device speaker when muted.
+        if (audioPolicy != null) {
+            Object policy = audioPolicy;
+            audioPolicy = null;
+            unregisterAudioPolicy(policy);
+        }
+    }
+
+    @SuppressLint("PrivateApi")
+    private static void unregisterAudioPolicy(Object policy) {
+        try {
+            Class<?> audioPolicyClass = Class.forName("android.media.audiopolicy.AudioPolicy");
+            try {
+                Method staticMethod = AudioManager.class.getDeclaredMethod("unregisterAudioPolicyAsyncStatic", audioPolicyClass);
+                staticMethod.setAccessible(true);
+                staticMethod.invoke(null, policy);
+                return;
+            } catch (NoSuchMethodException ignored) {
+                // Fall back to instance methods on AudioManager
+            }
+            AudioManager audioManager = (AudioManager) FakeContext.get().getSystemService(Context.AUDIO_SERVICE);
+            if (audioManager == null) {
+                Ln.w("Could not unregister audio policy: AudioManager unavailable");
+                return;
+            }
+            try {
+                Method unregisterMethod = AudioManager.class.getDeclaredMethod("unregisterAudioPolicy", audioPolicyClass);
+                unregisterMethod.setAccessible(true);
+                unregisterMethod.invoke(audioManager, policy);
+            } catch (NoSuchMethodException e) {
+                Method asyncMethod = AudioManager.class.getDeclaredMethod("unregisterAudioPolicyAsync", audioPolicyClass);
+                asyncMethod.setAccessible(true);
+                asyncMethod.invoke(audioManager, policy);
+            }
+        } catch (Exception e) {
+            Ln.w("Could not unregister audio policy", e);
         }
     }
 

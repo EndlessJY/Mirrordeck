@@ -5,7 +5,6 @@ import Foundation
 struct DevicePrefs: Codable, Equatable {
     var maxSize: Int?
     var maxFPS: Int?
-    var audio: Bool?
     /// Start mirroring as soon as the device connects (or the app opens with
     /// it connected).
     var autoMirror = false
@@ -43,7 +42,6 @@ extension MirrorOptions {
     static func current(for device: ADBDevice) -> MirrorOptions {
         let defaults = UserDefaults.standard
         var options = MirrorOptions(
-            audio: defaults.object(forKey: "mirror.audio") as? Bool ?? true,
             maxSize: defaults.object(forKey: "mirror.maxSize") as? Int ?? 1920,
             maxFPS: defaults.object(forKey: "mirror.maxFPS") as? Int ?? 60,
             videoBitrateMbps: defaults.object(forKey: "mirror.videoBitrateMbps") as? Int ?? 8,
@@ -52,7 +50,6 @@ extension MirrorOptions {
         let prefs = DevicePrefsStore.shared.prefs(for: device.identity)
         if let value = prefs.maxSize { options.maxSize = value }
         if let value = prefs.maxFPS { options.maxFPS = value }
-        if let value = prefs.audio { options.audio = value }
         return options
     }
 }
