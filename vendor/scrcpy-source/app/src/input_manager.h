@@ -14,6 +14,7 @@
 #include "trait/gamepad_processor.h"
 #include "trait/key_processor.h"
 #include "trait/mouse_processor.h"
+#include "util/tick.h"
 
 struct sc_input_manager {
     struct sc_controller *controller;
@@ -51,6 +52,12 @@ struct sc_input_manager {
     // LANADB: a host input method (e.g. Pinyin) is composing text; its keys
     // must not reach the device, only the committed text does.
     bool ime_composing;
+    // LANADB: timestamp of the last non-space text input, so a Space typed
+    // right after letters/Chinese goes through the same paste queue in order
+    // instead of racing with an async `dumpsys input_method` probe.
+    sc_tick last_text_input_at;
+    // LANADB: whether the latest SDLK_SPACE key-down was a key repeat.
+    bool last_space_repeat;
 };
 
 struct sc_input_manager_params {

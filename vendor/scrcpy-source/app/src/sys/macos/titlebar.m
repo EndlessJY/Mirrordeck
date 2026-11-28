@@ -457,6 +457,8 @@ enum {
 @property(nonatomic) NSUInteger stateRevision;
 @property(nonatomic) BOOL temporarilyLoweredForFinder;
 @property(nonatomic) BOOL nativeTheme;
+@property(nonatomic) BOOL cachedInputShown;
+@property(nonatomic) CFAbsoluteTime cachedInputShownAt;
 @property(nonatomic, strong) dispatch_queue_t actionQueue;
 @property(nonatomic, strong) dispatch_queue_t statusQueue;
 - (instancetype)initWithWindow:(NSWindow *)window
@@ -558,7 +560,7 @@ enum {
         [self refreshDeviceState];
         [self startScreenWatch];
         [self showLaunchOverlay];
-        // Only Space here (see handleSpace:); the editing shortcuts stay on
+        // Shortcut help (⌘/ and Esc) only; the editing shortcuts stay on
         // scrcpy's own path in this window.
         [self installEditingShortcuts];
         return self;
@@ -589,9 +591,6 @@ enum {
         NSWindow *window = event.window ?: NSApp.keyWindow;
         if (!strongSelf || window != strongSelf.targetWindow) {
             return event;
-        }
-        if ([strongSelf handleSpace:event]) {
-            return nil;
         }
         NSEventModifierFlags held = event.modifierFlags & (NSEventModifierFlagCommand |
             NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagShift);
@@ -645,39 +644,47 @@ enum {
 
 // LANADB: Space with no modifier pauses / plays a short video (a tap in the
 // middle of the screen), unless the phone's keyboard is up: then it is a
-// space typed into the text field. While the Mac input method is composing
-// (pinyin candidates), Space stays with it. Off with the arrow-key setting.
-- (BOOL)handleSpace:(NSEvent *)event {
-    const char *enabled = getenv("MIRRORDECK_ARROW_SWIPE");
-    if (!enabled || strcmp(enabled, "1") || event.keyCode != 49) {
+// space typed into the text field. Called from input_manager.c after SDL has
+// already let the Mac input method consume candidate-selection Space.
+- (BOOL)handleSpaceWithRepeat:(BOOL)repeat {
+    if (self.cachedInputShownAt > 0
+            && (CFAbsoluteTimeGetCurrent() - self.cachedInputShownAt) < 0.8
+            && self.cachedInputShown) {
+        // Keyboard was just confirmed up: let scrcpy's text path handle this
+        // space synchronously so consecutive spaces stay ordered.
         return NO;
     }
-    NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
-    if (flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl |
-                 NSEventModifierFlagOption | NSEventModifierFlagShift)) {
-        return NO;
+    if (repeat) {
+        return YES;
     }
-    id client = NSTextInputContext.currentInputContext.client;
-    if ([client respondsToSelector:@selector(hasMarkedText)] && [client hasMarkedText]) {
-        return NO;
-    }
-    if (event.type == NSEventTypeKeyDown && !event.isARepeat) {
-        sc_lanadb_flush_pending();
-        NSLog(@"LANADB: space pressed");
-        dispatch_async(self.actionQueue, ^{
-            NSString *state = [self runADB:@[@"dumpsys", @"input_method"] timeout:3];
-            BOOL typing = [state containsString:@"mInputShown=true"];
-            NSLog(@"LANADB: space → %@", typing ? @"typed space (keyboard up)" : @"tap");
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (typing) {
-                    sc_lanadb_press_key(62);   // KEYCODE_SPACE
-                } else {
-                    sc_lanadb_tap_center();
-                }
-            });
+    sc_lanadb_flush_pending();
+    NSLog(@"LANADB: space pressed");
+    __weak LANADBTitlebarController *weakSelf = self;
+    dispatch_async(self.actionQueue, ^{
+        LANADBTitlebarController *strongSelf = weakSelf;
+        if (!strongSelf) { return; }
+        NSString *state = [strongSelf runADB:@[@"dumpsys", @"input_method"] timeout:3];
+        BOOL typing = [state containsString:@"mInputShown=true"];
+        NSLog(@"LANADB: space → %@", typing ? @"typed space (keyboard up)" : @"tap");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LANADBTitlebarController *mainSelf = weakSelf;
+            if (mainSelf) {
+                mainSelf.cachedInputShown = typing;
+                mainSelf.cachedInputShownAt = CFAbsoluteTimeGetCurrent();
+            }
+            if (typing) {
+                sc_lanadb_press_key(62);   // KEYCODE_SPACE
+            } else {
+                sc_lanadb_tap_center();
+            }
         });
-    }
+    });
     return YES;
+}
+
+- (void)invalidateInputCache {
+    self.cachedInputShown = NO;
+    self.cachedInputShownAt = 0;
 }
 
 - (void)dealloc {
@@ -1915,6 +1922,26 @@ sc_lanadb_app_back(bool down) {
         [controller rootBack];
     }
     return true;
+}
+
+// LANADB: Space in a mirror window (tap to pause when no phone keyboard is up,
+// or inject Space when typing). Returns true when handled asynchronously here.
+bool
+sc_lanadb_handle_space(bool repeat) {
+    LANADBTitlebarController *controller = lanadb_active_titlebar;
+    if (!controller) {
+        return false;
+    }
+    return [controller handleSpaceWithRepeat:repeat];
+}
+
+// LANADB: clear cached phone keyboard visibility after navigation or clicks.
+void
+sc_lanadb_invalidate_input_cache(void) {
+    LANADBTitlebarController *controller = lanadb_active_titlebar;
+    if (controller) {
+        [controller invalidateInputCache];
+    }
 }
 
 // LANADB: this window's own volume moved (single-app window, see
